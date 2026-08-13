@@ -42,6 +42,25 @@ next free port automatically, honors an optional shared passphrase, limits
 upload size (default 50 MB), and auto-deletes job files after 24 h — all
 configured in `server_config.json`. Fully offline: no CDN, no cloud calls.
 
+## Deploy to Render
+
+The app stores each job's files on local disk (`uploads/`, `output/`) and
+reads them back on the download links, so it needs a normal long-running
+process with a persistent-during-uptime filesystem — Render's free web
+service tier works out of the box, no code changes needed. Platforms with a
+stateless/serverless Python runtime (e.g. Vercel functions) will NOT work
+as-is: uploads and downloads land on different, isolated invocations, so the
+download links 404/500.
+
+1. Push this repo to GitHub (already done if you're reading this here).
+2. On [Render](https://dashboard.render.com), **New → Blueprint**, point it at
+   this repo — it picks up [`render.yaml`](render.yaml) automatically (build:
+   `pip install -r requirements.txt`, start: `gunicorn app:app`).
+3. Keep it to **one instance / one worker** (already set in `render.yaml`).
+   Job files live on that instance's local disk only — scaling to multiple
+   instances would send a download request to an instance that never saw the
+   upload.
+
 Inputs: CSV, TSV, semicolon/pipe-delimited, XLSX/XLSM/XLS (all sheets).
 File type is detected from content, so a mislabeled extension won't crash it;
 UTF-8/CP1252/Latin-1 encodings are handled automatically.
