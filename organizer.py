@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+from datetime import datetime
 
 import pandas as pd
 
@@ -815,6 +816,7 @@ def organize_dataframe(df, schema):
         "unmapped_headers": [],
         "row_diffs": [],
         "aux_data": pd.DataFrame(),
+        "timestamp_synthesized": False,
     }
 
     if df.empty:
@@ -829,12 +831,19 @@ def organize_dataframe(df, schema):
     source_for = {target: orig for orig, target in mapping.items()}
 
     diffs = []
+    processed_at = datetime.now().strftime("%m/%d/%Y %H:%M")
     out = pd.DataFrame(index=df.index)
     for col in columns + aux_columns:
         source = source_for.get(col)
         parts = compose.get(col)
         if source is None and parts is None and col in aux_columns:
             continue  # aux fields are optional; only carry them when present
+        no_source = source is None and parts is None
+        # the source file has no timestamp/date-added field at all — stamp
+        # every row with the time this file was processed instead of NA
+        synth_timestamp = no_source and col == "Timestamp" and types[col] == "datetime"
+        if synth_timestamp:
+            report["timestamp_synthesized"] = True
         normalize = _NORMALIZERS[types[col]]
         issues = report["column_issues"].get(col)
         part_sep = " " if types[col] == "name" else ", "
@@ -851,6 +860,8 @@ def organize_dataframe(df, schema):
                 raw = part_sep.join(bits)
             elif source is not None and not pd.isna(df.at[i, source]):
                 raw = str(df.at[i, source])
+            elif synth_timestamp:
+                raw = processed_at
             val = normalize(raw)
             if issues is not None:
                 if val == NA:

@@ -190,6 +190,9 @@
     {% if result.report.header_inferred %}
       <p class="note">No header row was found in this file, so column meanings were inferred from the data itself (phones, dates, ZIPs, carriers, …). Double-check the result.</p>
     {% endif %}
+    {% if result.report.timestamp_synthesized %}
+      <p class="note">This file had no timestamp / date-added column, so <b>Timestamp</b> was stamped with the time this file was processed instead of being left blank.</p>
+    {% endif %}
     {% if result.report.empty_rows_skipped %}
       <p class="note">{{ result.report.empty_rows_skipped }} row(s) contained no usable lead data and were skipped.</p>
     {% endif %}
