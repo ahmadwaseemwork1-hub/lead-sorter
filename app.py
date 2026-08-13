@@ -5,7 +5,7 @@ import os
 import uuid
 
 import pandas as pd
-from flask import Flask, abort, render_template, request, send_file
+from flask import Flask, abort, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
 
 from organizer import load_schema, organize_file
@@ -58,6 +58,13 @@ def _inject_flags():
 @app.route("/", methods=["GET"])
 def index():
     return render_template("index.html", result=None, error=None)
+
+
+@app.route("/organize", methods=["GET"])
+def organize_get():
+    # reaching here means a page refresh/back-nav on the results page, not a
+    # real upload (the form only ever POSTs here) — send them back to start
+    return redirect(url_for("index"))
 
 
 @app.route("/organize", methods=["POST"])
