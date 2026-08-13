@@ -1,0 +1,57 @@
+{
+  "verticals": {
+    "insurance": ["current insurance", "carrier", "premium", "policy type", "policy number", "autos", "cars make and model", "homeowner"],
+    "real_estate": ["listing", "property address", "mls", "list price", "square feet", "bedrooms", "lot size"],
+    "general_sales": ["company", "deal size", "product", "quote amount"]
+  },
+  "vertical_min_hits": 2,
+
+  "nicknames": {
+    "jon": "john", "jonny": "john", "johnny": "john",
+    "bob": "robert", "rob": "robert", "bobby": "robert", "robbie": "robert",
+    "bill": "william", "will": "william", "billy": "william", "willie": "william",
+    "liz": "elizabeth", "beth": "elizabeth", "betty": "elizabeth",
+    "jim": "james", "jimmy": "james", "mike": "michael", "mick": "michael",
+    "tom": "thomas", "tommy": "thomas", "tony": "anthony",
+    "chris": "christopher", "dan": "daniel", "danny": "daniel",
+    "dave": "david", "ed": "edward", "eddie": "edward", "ted": "theodore",
+    "greg": "gregory", "jeff": "jeffrey", "joe": "joseph", "joey": "joseph",
+    "kate": "katherine", "kathy": "katherine", "katie": "katherine",
+    "larry": "lawrence", "matt": "matthew", "nick": "nicholas",
+    "pat": "patricia", "patty": "patricia", "peggy": "margaret", "meg": "margaret",
+    "rick": "richard", "dick": "richard", "richie": "richard",
+    "ron": "ronald", "ronnie": "ronald", "sam": "samuel", "sammy": "samuel",
+    "steve": "steven", "sue": "susan", "susie": "susan",
+    "tim": "timothy", "timmy": "timothy", "andy": "andrew", "drew": "andrew",
+    "tricia": "patricia", "trish": "patricia", "raymond": "ray", "ray": "raymond"
+  },
+  "name_fuzzy_threshold": 0.85,
+
+  "email_domains": [
+    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com",
+    "icloud.com", "comcast.net", "att.net", "verizon.net", "msn.com",
+    "live.com", "bellsouth.net", "sbcglobal.net", "charter.net", "cox.net"
+  ],
+  "email_autofix_ratio": 0.85,
+  "email_suggest_ratio": 0.75,
+
+  "rules": {
+    "dob_implausible": {"enabled": true, "min_age": 16, "max_age": 105, "penalty": 10},
+    "dob_vs_age": {"enabled": true, "tolerance_years": 2, "penalty": 10},
+    "dob_vs_occupation": {"enabled": true, "student_max_age": 60, "retired_min_age": 40, "penalty": 10},
+    "email_invalid": {"enabled": true, "penalty": 5},
+    "email_domain_typo": {"enabled": true, "penalty": 5},
+    "phone_invalid": {"enabled": true, "penalty": 15},
+    "name_suspicious": {"enabled": true, "penalty": 5},
+    "duplicate_group": {"enabled": true, "penalty": 10}
+  },
+
+  "scoring": {
+    "weights": {
+      "Full Name": 15, "Phone Number": 20, "Address": 10, "ZIP Code": 10,
+      "Date of Birth": 10, "Homeowner": 5, "Autos": 5,
+      "Current Insurance": 10, "Cars Make and Model": 5, "Timestamp": 10
+    },
+    "review_threshold": 70
+  }
+}

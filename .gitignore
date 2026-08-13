@@ -1,0 +1,18 @@
+# Runtime job files (may contain real lead PII from local testing/use)
+uploads/*
+output/*
+!uploads/.gitkeep
+!output/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local machine-specific Claude Code settings (contains local paths/history)
+.claude/settings.local.json
+
+# Editors / OS
+.vscode/
+.DS_Store
+Thumbs.db

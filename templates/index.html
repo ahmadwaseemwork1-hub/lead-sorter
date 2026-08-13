@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leads Sorter — CRM Portal</title>
+<style>
+  :root {
+    --purple: #4b3a8f; --purple-dark: #37296e; --bg: #f4f3fa;
+    --ok: #1a7f4e; --warn: #b3261e; --line: #e2e0ee;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: #222; }
+  header { background: var(--purple); color: #fff; padding: 18px 28px; }
+  header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  header p { margin: 4px 0 0; font-size: 13px; opacity: .85; }
+  main { max-width: 1200px; margin: 24px auto; padding: 0 20px; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  form.upload { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  input[type=file] { border: 1px dashed #b6b0d6; border-radius: 8px; padding: 10px; background: #faf9ff; }
+  button, a.btn {
+    background: var(--purple); color: #fff; border: 0; border-radius: 8px;
+    padding: 10px 18px; font-size: 14px; cursor: pointer; text-decoration: none; display: inline-block;
+  }
+  button:hover, a.btn:hover { background: var(--purple-dark); }
+  .error { color: var(--warn); font-weight: 600; }
+  .stats { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+  .stat { background: #faf9ff; border: 1px solid var(--line); border-radius: 8px; padding: 10px 16px; }
+  .stat b { display: block; font-size: 20px; color: var(--purple); }
+  .stat span { font-size: 12px; color: #666; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; white-space: nowrap; }
+  thead th { background: var(--purple); color: #fff; cursor: pointer; position: sticky; top: 0; user-select: none; }
+  thead th:hover { background: var(--purple-dark); }
+  tbody tr:nth-child(even) { background: #f8f7fc; }
+  tr.invalid td { background: #fdeceb; }
+  tr.review td { background: #fdf6e3; }
+  #dropzone.hover { background: #efeaff; border-color: var(--purple); }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 3px solid var(--line);
+          border-top-color: var(--purple); border-radius: 50%;
+          animation: spin 0.8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .scroll { overflow: auto; max-height: 60vh; border: 1px solid var(--line); border-radius: 8px; }
+  .issues td, .issues th { font-size: 12px; }
+  h2 { font-size: 16px; margin: 0 0 12px; color: var(--purple-dark); }
+  .note { font-size: 12px; color: #777; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Leads Sorter &mdash; CRM Portal</h1>
+  <p>Upload an unorganized leads CSV &rarr; get a clean, standardized lead sheet back.</p>
+</header>
+<main>
+  <div class="card">
+    <h2>1. Upload your leads file (CSV, TSV or Excel)</h2>
+    <form id="upform" class="upload" method="post" action="/organize" enctype="multipart/form-data">
+      <div id="dropzone" style="border:2px dashed #b6b0d6;border-radius:10px;padding:18px 22px;background:#faf9ff;cursor:pointer;flex:1;min-width:260px;text-align:center">
+        <span id="dropmsg">Drag &amp; drop a file here, or click to choose</span>
+        <input type="file" name="file" id="fileinput" accept=".csv,.tsv,.xlsx,.xlsm,.xls,text/csv" style="display:none">
+      </div>
+      {% if needs_passphrase %}
+      <input type="password" name="passphrase" placeholder="Passphrase" style="padding:10px;border:1px solid var(--line);border-radius:8px">
+      {% endif %}
+      <input type="hidden" name="schema" value="default">
+      <button type="submit">Organize leads</button>
+    </form>
+    <p id="busy" style="display:none;color:var(--purple-dark);font-weight:600">
+      <span class="spin"></span> Processing&hellip; large files can take a little while. Don't close this page.
+    </p>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  </div>
+
+  {% if result %}
+  <div class="card">
+    <h2>2. Summary</h2>
+    <div class="stats">
+      <div class="stat"><b>{{ result.report.input_rows }}</b><span>rows in</span></div>
+      <div class="stat"><b>{{ result.report.output_rows }}</b><span>clean leads out</span></div>
+      <div class="stat"><b>{{ result.report.avg_score if result.report.avg_score is defined else '—' }}</b><span>avg quality score</span></div>
+      <div class="stat"><b>{{ result.report.review_rows|length if result.report.review_rows is defined else 0 }}</b><span>need manual review</span></div>
+      <div class="stat"><b>{{ result.report.duplicates_removed }}</b><span>duplicates removed</span></div>
+      <div class="stat"><b>{{ result.report.duplicate_groups|length if result.report.duplicate_groups is defined else 0 }}</b><span>possible duplicate groups</span></div>
+      <div class="stat"><b>{{ result.report.invalid_phone_rows|length }}</b><span>invalid phone numbers</span></div>
+      <div class="stat"><b>{{ result.report.vertical if result.report.vertical is defined else 'general' }}</b><span>detected vertical</span></div>
+    </div>
+    <table class="issues">
+      <thead><tr><th>Column</th>{% for col in result.columns %}<th>{{ col }}</th>{% endfor %}</tr></thead>
+      <tbody>
+        <tr><td><b>Values fixed</b></td>{% for col in result.columns %}<td>{{ result.report.column_issues[col].fixed }}</td>{% endfor %}</tr>
+        <tr><td><b>Missing (NA)</b></td>{% for col in result.columns %}<td>{{ result.report.column_issues[col].na }}</td>{% endfor %}</tr>
+      </tbody>
+    </table>
+    {% if result.report.duplicate_groups %}
+      <p class="note">Possible duplicates (kept, flagged for merge review):
+        {% for g in result.report.duplicate_groups %}group {{ g.group }}: rows {{ g.rows|join(" & ") }} ({{ g.names|join(" / ") }}){% if not loop.last %}; {% endif %}{% endfor %}
+      </p>
+    {% endif %}
+    {% if result.report.email_corrections %}
+      <p class="note">Email fixes:
+        {% for c in result.report.email_corrections %}row {{ c.row }}: {{ c.original }} &rarr; {{ c.suggested }} ({{ "applied" if c.applied else "suggestion only" }}){% if not loop.last %}, {% endif %}{% endfor %}
+      </p>
+    {% endif %}
+    {% if result.report.removed_duplicates %}
+      <p class="note">Removed duplicate leads:
+        {% for d in result.report.removed_duplicates %}{{ d["Full Name"] }} ({{ d["Phone Number"] }}){% if not loop.last %}, {% endif %}{% endfor %}
+      </p>
+    {% endif %}
+    {% if result.report.skipped_non_lead_rows %}
+      <p class="note">{{ result.report.skipped_non_lead_rows }} non-lead row(s) in the file (blank lines, legend/junk rows above the data) were skipped — row numbers in this output may sit that many rows higher than in the original file.</p>
+    {% endif %}
+    {% if result.report.header_inferred %}
+      <p class="note">No header row was found in this file, so column meanings were inferred from the data itself (phones, dates, ZIPs, carriers, …). Double-check the result.</p>
+    {% endif %}
+    {% if result.report.empty_rows_skipped %}
+      <p class="note">{{ result.report.empty_rows_skipped }} row(s) contained no usable lead data and were skipped.</p>
+    {% endif %}
+    {% if result.report.dropped_headers %}
+      <p class="note">Dropped input columns: {{ result.report.dropped_headers|join(", ") }}</p>
+    {% endif %}
+    {% if result.report.unmapped_headers %}
+      <p class="note">Ignored (unrecognized) input columns: {{ result.report.unmapped_headers|join(", ") }}</p>
+    {% endif %}
+    <p style="margin-top:14px">
+      <a class="btn" href="/download/{{ result.token }}">&#8681; Download organized CSV</a>
+      <a class="btn" href="/diff/{{ result.token }}" style="background:#6b5cb8">&#8681; Change report (diff)</a>
+      <a class="btn" href="/errors/{{ result.token }}" style="background:#8a7cc2">&#8681; Error log (JSON)</a>
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>3. Organized leads ({{ result.rows|length }}) — click a header to sort</h2>
+    <div class="scroll">
+      <table id="leads">
+        <thead>
+          <tr>{% for col in result.columns %}<th data-i="{{ loop.index0 }}">{{ col }}</th>{% endfor %}<th data-i="{{ result.columns|length }}">Score</th></tr>
+        </thead>
+        <tbody>
+          {% for row in result.rows %}
+          <tr class="{{ 'invalid' if row.invalid else ('review' if row.review else '') }}">
+            {% for cell in row.cells %}<td>{{ cell }}</td>{% endfor %}
+            <td>{{ row.score }}{% if row.review %} &#9888;{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Red rows have a phone number that is not 10 digits. Amber rows scored below the review threshold (70) — check them manually. The Score column is shown here and in the error log only; the downloaded CSV keeps the standard 10 columns.</p>
+  </div>
+  {% endif %}
+</main>
+<script>
+  // drag-and-drop upload + busy indicator (all local, no CDN)
+  (function () {
+    var dz = document.getElementById("dropzone");
+    var input = document.getElementById("fileinput");
+    var msg = document.getElementById("dropmsg");
+    var form = document.getElementById("upform");
+    if (!dz) return;
+    dz.addEventListener("click", function () { input.click(); });
+    input.addEventListener("change", function () {
+      if (input.files.length) msg.textContent = "Selected: " + input.files[0].name;
+    });
+    ["dragover", "dragenter"].forEach(function (ev) {
+      dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.add("hover"); });
+    });
+    ["dragleave", "drop"].forEach(function (ev) {
+      dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.remove("hover"); });
+    });
+    dz.addEventListener("drop", function (e) {
+      if (e.dataTransfer.files.length) {
+        input.files = e.dataTransfer.files;
+        msg.textContent = "Selected: " + input.files[0].name;
+      }
+    });
+    form.addEventListener("submit", function () {
+      document.getElementById("busy").style.display = "block";
+    });
+  })();
+
+  // click-to-sort on the results table
+  document.querySelectorAll("#leads thead th").forEach(function (th) {
+    th.addEventListener("click", function () {
+      var i = +th.dataset.i;
+      var tbody = document.querySelector("#leads tbody");
+      var rows = Array.from(tbody.rows);
+      var asc = th.dataset.asc !== "1";
+      document.querySelectorAll("#leads thead th").forEach(function (h) { delete h.dataset.asc; });
+      th.dataset.asc = asc ? "1" : "0";
+      rows.sort(function (a, b) {
+        var x = a.cells[i].textContent, y = b.cells[i].textContent;
+        var nx = parseFloat(x.replace(/[^\d.-]/g, "")), ny = parseFloat(y.replace(/[^\d.-]/g, ""));
+        var cmp = (!isNaN(nx) && !isNaN(ny)) ? nx - ny : x.localeCompare(y);
+        return asc ? cmp : -cmp;
+      });
+      rows.forEach(function (r) { tbody.appendChild(r); });
+    });
+  });
+</script>
+</body>
+</html>

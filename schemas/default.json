@@ -1,0 +1,96 @@
+{
+  "name": "default",
+  "description": "Default insurance-leads portal profile. Output columns, their order, header aliases, and normalization types all live here so new portal profiles can be added as new JSON files without code changes.",
+  "columns": [
+    {
+      "name": "Timestamp",
+      "type": "datetime",
+      "aliases": ["timestamp", "time stamp", "time", "date added", "created", "created at", "submission date"]
+    },
+    {
+      "name": "Full Name",
+      "type": "name",
+      "aliases": ["full name", "name", "fullname", "lead name", "customer name", "client name"]
+    },
+    {
+      "name": "Date of Birth",
+      "type": "date",
+      "aliases": ["date of birth", "dob", "d o b", "date of birt", "birth date", "birthdate", "born"]
+    },
+    {
+      "name": "Address",
+      "type": "text",
+      "aliases": ["address", "street address", "addr", "home address", "full address"]
+    },
+    {
+      "name": "Phone Number",
+      "type": "phone",
+      "aliases": ["phone number", "phone", "phone num", "phone no", "telephone", "contact", "contact number", "mobile", "cell", "cell phone"]
+    },
+    {
+      "name": "ZIP Code",
+      "type": "zip",
+      "aliases": ["zip code", "zip", "zipcode", "postal code", "postal", "postcode"]
+    },
+    {
+      "name": "Homeowner",
+      "type": "homeowner",
+      "aliases": ["homeowner", "home owner", "owner status", "own rent", "own or rent", "housing", "housing status", "residence status"]
+    },
+    {
+      "name": "Autos",
+      "type": "int",
+      "aliases": ["autos", "auto", "vehicles", "num autos", "number of autos", "auto count", "vehicle count", "no of cars"]
+    },
+    {
+      "name": "Current Insurance",
+      "type": "carrier",
+      "aliases": ["current insurance", "current ins", "ins", "insurance", "carrier", "current carrier", "insurance company", "provider"]
+    },
+    {
+      "name": "Cars Make and Model",
+      "type": "text",
+      "aliases": ["cars make and model", "car make and model", "make and model", "cars make model", "vehicle info", "car info", "vehicle details", "car details"]
+    }
+  ],
+  "compose": {
+    "Full Name": [
+      ["first name", "first", "fname", "given name"],
+      ["middle name", "middle"],
+      ["last name", "last", "lname", "surname", "family name"]
+    ],
+    "Address": [
+      ["street", "street address", "address 1", "address line 1", "addr"],
+      ["city", "town"],
+      ["state", "province"]
+    ]
+  },
+  "aux_columns": [
+    {
+      "name": "Email",
+      "type": "email",
+      "aliases": ["email", "e-mail", "email address", "mail"]
+    },
+    {
+      "name": "Age",
+      "type": "int",
+      "aliases": ["age", "current age"]
+    },
+    {
+      "name": "Occupation",
+      "type": "text",
+      "aliases": ["occupation", "job", "job title", "profession"]
+    },
+    {
+      "name": "Country",
+      "type": "text",
+      "aliases": ["country"]
+    }
+  ],
+  "drop_columns": [
+    "agent name", "agent", "agent nam", "assigned agent",
+    "leads note", "lead notes", "leads notes", "lead note", "notes", "note", "comments", "remarks"
+  ],
+  "dedupe_on": ["Phone Number", "Full Name"],
+  "sort_by": []
+}

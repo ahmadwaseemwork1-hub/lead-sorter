@@ -1,0 +1,7 @@
+{
+  "host": "0.0.0.0",
+  "port": 8080,
+  "passphrase": "",
+  "retention_hours": 24,
+  "max_upload_mb": 50
+}

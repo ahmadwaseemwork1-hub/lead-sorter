@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leads Sorter — offline single-file edition</title>
+<style>
+  :root { --purple:#4b3a8f; --purple-dark:#37296e; --bg:#f4f3fa; --line:#e2e0ee; --warn:#b3261e; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; background:var(--bg); color:#222; }
+  header { background:var(--purple); color:#fff; padding:18px 28px; }
+  header h1 { margin:0; font-size:20px; font-weight:600; }
+  header p { margin:4px 0 0; font-size:13px; opacity:.85; }
+  main { max-width:1200px; margin:24px auto; padding:0 20px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:20px; margin-bottom:20px; }
+  #dropzone { border:2px dashed #b6b0d6; border-radius:10px; padding:26px 22px; background:#faf9ff; cursor:pointer; text-align:center; font-size:15px; }
+  #dropzone.hover { background:#efeaff; border-color:var(--purple); }
+  button,.btn { background:var(--purple); color:#fff; border:0; border-radius:8px; padding:10px 18px; font-size:14px; cursor:pointer; text-decoration:none; display:inline-block; margin-right:8px; }
+  button:hover,.btn:hover { background:var(--purple-dark); }
+  .error { color:var(--warn); font-weight:600; }
+  .stats { display:flex; gap:14px; flex-wrap:wrap; margin-bottom:14px; }
+  .stat { background:#faf9ff; border:1px solid var(--line); border-radius:8px; padding:10px 16px; }
+  .stat b { display:block; font-size:20px; color:var(--purple); }
+  .stat span { font-size:12px; color:#666; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th,td { border:1px solid var(--line); padding:6px 9px; text-align:left; white-space:nowrap; }
+  thead th { background:var(--purple); color:#fff; position:sticky; top:0; cursor:pointer; }
+  tbody tr:nth-child(even) { background:#f8f7fc; }
+  tr.invalid td { background:#fdeceb; } tr.review td { background:#fdf6e3; }
+  .scroll { overflow:auto; max-height:60vh; border:1px solid var(--line); border-radius:8px; }
+  .note { font-size:12px; color:#777; margin-top:8px; }
+  h2 { font-size:16px; margin:0 0 12px; color:var(--purple-dark); }
+  .spin { display:inline-block; width:14px; height:14px; border:3px solid var(--line); border-top-color:var(--purple); border-radius:50%; animation:spin .8s linear infinite; vertical-align:-2px; margin-right:6px; }
+  @keyframes spin { to { transform:rotate(360deg);} }
+</style>
+</head>
+<body>
+<header>
+  <h1>Leads Sorter &mdash; offline edition</h1>
+  <p>One file, no installs, nothing leaves this laptop. Drop a leads file (CSV, TSV, Excel) and download the organized result.</p>
+</header>
+<main>
+  <div class="card">
+    <h2>1. Choose your leads file</h2>
+    <div id="dropzone">Drag &amp; drop a file here, or click to choose<br>
+      <span class="note">CSV &middot; TSV &middot; XLSX &middot; XLSM &middot; XLS(new-format)</span>
+    </div>
+    <input type="file" id="fileinput" accept=".csv,.tsv,.txt,.xlsx,.xlsm,.xls" style="display:none">
+    <p id="busy" style="display:none;color:var(--purple-dark);font-weight:600"><span class="spin"></span>Processing&hellip;</p>
+    <p id="err" class="error"></p>
+  </div>
+  <div id="results" style="display:none">
+    <div class="card">
+      <h2>2. Summary</h2>
+      <div class="stats" id="statcards"></div>
+      <div id="notes"></div>
+      <p style="margin-top:14px">
+        <button id="dl-clean">&#8681; Organized CSV</button>
+        <button id="dl-diff">&#8681; Change report</button>
+        <button id="dl-errors">&#8681; Error log (JSON)</button>
+      </p>
+    </div>
+    <div class="card">
+      <h2 id="tabletitle">3. Organized leads</h2>
+      <div class="scroll"><table id="leads"><thead></thead><tbody></tbody></table></div>
+      <p class="note">Red rows: invalid phone. Amber rows: quality score under 70 — review manually.
+        Preview caps at 500 rows; the downloaded CSV always has everything.</p>
+    </div>
+  </div>
+</main>
+<script>
+"use strict";
+// ============================ CORE_START ============================
+const NA = "NA";
+const SCHEMA_COLS = [
+  { name:"Timestamp", type:"datetime", aliases:["timestamp","time stamp","time","date added","created","created at","submission date"] },
+  { name:"Full Name", type:"name", aliases:["full name","name","fullname","lead name","customer name","client name"] },
+  { name:"Date of Birth", type:"date", aliases:["date of birth","dob","d o b","date of birt","birth date","birthdate","born"] },
+  { name:"Address", type:"text", aliases:["address","street address","addr","home address","full address"] },
+  { name:"Phone Number", type:"phone", aliases:["phone number","phone","phone num","phone no","telephone","contact","contact number","mobile","cell","cell phone"] },
+  { name:"ZIP Code", type:"zip", aliases:["zip code","zip","zipcode","postal code","postal","postcode"] },
+  { name:"Homeowner", type:"homeowner", aliases:["homeowner","home owner","owner status","own rent","own or rent","housing","housing status","residence status"] },
+  { name:"Autos", type:"int", aliases:["autos","auto","vehicles","num autos","number of autos","auto count","vehicle count","no of cars"] },
+  { name:"Current Insurance", type:"carrier", aliases:["current insurance","current ins","ins","insurance","carrier","current carrier","insurance company","provider"] },
+  { name:"Cars Make and Model", type:"text", aliases:["cars make and model","car make and model","make and model","cars make model","vehicle info","car info","vehicle details","car details"] },
+];
+const AUX_COLS = [
+  { name:"Email", type:"email", aliases:["email","e-mail","email address","mail"] },
+  { name:"Age", type:"int", aliases:["age","current age"] },
+  { name:"Occupation", type:"text", aliases:["occupation","job","job title","profession"] },
+  { name:"Country", type:"text", aliases:["country"] },
+];
+const DROP_HEADERS = ["agent name","agent","agent nam","assigned agent","leads note","lead notes","leads notes","lead note","notes","note","comments","remarks"];
+const COMPOSE = {
+  "Full Name": [["first name","first","fname","given name"],["middle name","middle"],["last name","last","lname","surname","family name"]],
+  "Address": [["street","street address","address 1","address line 1","addr"],["city","town"],["state","province"]],
+};
+const DEDUPE_ON = ["Phone Number","Full Name"];
+const CARRIER_PATTERNS = [
+  [/farm\s*bureau/i,"Farm Bureau"],[/stat\s*e?\s*farm|sate\s*farm/i,"State Farm"],
+  [/progr[ae]?s{1,2}ive/i,"Progressive"],[/g[ei]{1,2}co/i,"GEICO"],[/\busaa\b/i,"USAA"],
+  [/allstate/i,"Allstate"],[/liberty/i,"Liberty Mutual"],[/hartford/i,"Hartford"],
+  [/auto\s*(owners?|onwers?)/i,"Auto-Owners"],[/\baaa\b/i,"AAA"],[/national\s*gen[ae]ral/i,"National General"],
+  [/nation\s*wide/i,"Nationwide"],[/mercury/i,"Mercury"],[/cincinnati/i,"Cincinnati"],
+  [/direct\s*auto/i,"Direct Auto"],[/go\s*auto/i,"Go Auto"],[/brist[ao]l\s*west/i,"Bristol West"],
+  [/\broot\b/i,"Root Insurance"],[/travelers/i,"Travelers"],[/\bfarmers\b/i,"Farmers"],
+  [/\bassurance\b/i,"Assurance"],[/alpha\s*ins\w*/i,"Alpha Insurance"],[/atl\s*insurance/i,"ATL Insurance Group"],
+  [/\baetna\b/i,"Aetna"],[/\bunited\b/i,"United"],
+];
+const MAKES = /(?<![A-Za-z])(chevrolet|chevy|checy|ford|toyota|honda|hunda|nissan|dodge|dogde|doge|ram|jeep|kia|hyundai|hundai|hundayi|lexus|bmw|mercedes|mercedies|benz|audi|gmc|buick|buic|cadillac|lincoln|mazda|subaru|volkswagen|volkswagon|volks\s*wag[ao]n|acura|infiniti|tesla|rivian|volvo|chrysler|mitsubishi|saab|mercury|pontiac|land\s*rover|landrover|range\s*rover|avalon|sienna)/i;
+const NICKNAMES = { jon:"john",jonny:"john",johnny:"john",bob:"robert",rob:"robert",bobby:"robert",robbie:"robert",bill:"william",will:"william",billy:"william",willie:"william",liz:"elizabeth",beth:"elizabeth",betty:"elizabeth",jim:"james",jimmy:"james",mike:"michael",mick:"michael",tom:"thomas",tommy:"thomas",tony:"anthony",chris:"christopher",dan:"daniel",danny:"daniel",dave:"david",ed:"edward",eddie:"edward",ted:"theodore",greg:"gregory",jeff:"jeffrey",joe:"joseph",joey:"joseph",kate:"katherine",kathy:"katherine",katie:"katherine",larry:"lawrence",matt:"matthew",nick:"nicholas",pat:"patricia",patty:"patricia",peggy:"margaret",meg:"margaret",rick:"richard",dick:"richard",richie:"richard",ron:"ronald",ronnie:"ronald",sam:"samuel",sammy:"samuel",steve:"steven",sue:"susan",susie:"susan",tim:"timothy",timmy:"timothy",andy:"andrew",drew:"andrew",tricia:"patricia",trish:"patricia" };
+const EMAIL_DOMAINS = ["gmail.com","yahoo.com","hotmail.com","outlook.com","aol.com","icloud.com","comcast.net","att.net","verizon.net","msn.com","live.com","bellsouth.net","sbcglobal.net","charter.net","cox.net"];
+const WEIGHTS = { "Full Name":15,"Phone Number":20,"Address":10,"ZIP Code":10,"Date of Birth":10,"Homeowner":5,"Autos":5,"Current Insurance":10,"Cars Make and Model":5,"Timestamp":10 };
+const PENALTIES = { dob_implausible:10,dob_vs_age:10,dob_vs_occupation:10,email_invalid:5,email_domain_typo:5,phone_invalid:15,name_suspicious:5,duplicate_group:10 };
+const REVIEW_THRESHOLD = 70;
+const VERTICALS = {
+  insurance:["current insurance","carrier","premium","policy type","policy number","autos","cars make and model","homeowner"],
+  real_estate:["listing","property address","mls","list price","square feet","bedrooms","lot size"],
+  general_sales:["company","deal size","product","quote amount"],
+};
+const DIFF_REASONS = { name:"name recased/cleaned",date:"date normalized to MM/DD/YYYY",datetime:"timestamp normalized",phone:"phone formatted",zip:"ZIP normalized",homeowner:"homeowner standardized",int:"count normalized",carrier:"carrier canonicalized",email:"email normalized",text:"whitespace cleaned" };
+
+// ---------- small utils ----------
+const MISSING = new Set(["","na","n/a","none","null","-","--","nan"]);
+const isMissing = (s) => MISSING.has(String(s).toLowerCase());
+const clean = (v) => String(v == null ? "" : v).replace(/\s+/g, " ").trim();
+const normHeader = (h) => String(h).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+function osa(a, b) { // restricted Damerau-Levenshtein (transposition = 1 edit)
+  const m = a.length, n = b.length;
+  if (!m || !n) return Math.max(m, n);
+  let prev2 = null, prev = Array.from({length:n+1}, (_, j) => j), cur;
+  for (let i = 1; i <= m; i++) {
+    cur = [i];
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i-1] === b[j-1] ? 0 : 1;
+      let v = Math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + cost);
+      if (i > 1 && j > 1 && a[i-1] === b[j-2] && a[i-2] === b[j-1])
+        v = Math.min(v, prev2[j-2] + 1);
+      cur.push(v);
+    }
+    prev2 = prev; prev = cur;
+  }
+  return prev[n];
+}
+const sim = (a, b) => { const L = Math.max(a.length, b.length); return L ? 1 - osa(a, b) / L : 1; };
+function closest(s, list, cutoff) {
+  let best = null, bestR = cutoff;
+  for (const c of list) { const r = sim(s, c); if (r >= bestR) { bestR = r; best = c; } }
+  return best;
+}
+
+// ---------- dates ----------
+function mkDT(y, mo, d, h, mi) {
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || y < 1000 || y > 3000) return null;
+  const t = new Date(y, mo - 1, d);
+  if (t.getMonth() + 1 !== mo || t.getDate() !== d) return null;
+  return { y, mo, d, h: h || 0, mi: mi || 0 };
+}
+function parseDT(s) {
+  s = clean(s);
+  let m = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/);
+  if (m) return mkDT(+m[3], +m[1], +m[2], +m[4], +m[5]);
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s](\d{1,2}):(\d{2}))?/);
+  if (m) return mkDT(+m[1], +m[2], +m[3], +m[4], +m[5]);
+  const d = new Date(s);
+  if (isNaN(d) || d.getFullYear() < 1000) return null;
+  return { y:d.getFullYear(), mo:d.getMonth()+1, d:d.getDate(), h:d.getHours(), mi:d.getMinutes() };
+}
+const p2 = (n) => String(n).padStart(2, "0");
+const fmtD = (t) => `${p2(t.mo)}/${p2(t.d)}/${t.y}`;
+const fmtDT = (t) => (t.h || t.mi) ? `${fmtD(t)} ${p2(t.h)}:${p2(t.mi)}` : fmtD(t);
+function ageFrom(dobStr) {
+  const m = String(dobStr).match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  if (!m) return null;
+  const now = new Date();
+  let age = now.getFullYear() - +m[3];
+  if (now.getMonth() + 1 < +m[1] || (now.getMonth() + 1 === +m[1] && now.getDate() < +m[2])) age--;
+  return age;
+}
+
+// ---------- normalizers ----------
+function capWord(w) {
+  return w.split("-").map(p => p ? p[0].toUpperCase() + p.slice(1).toLowerCase() : p).join("-");
+}
+function normName(v) {
+  const s = clean(v);
+  if (isMissing(s)) return NA;
+  return s.split(" ").map(w => (w === w.toUpperCase() || w === w.toLowerCase()) ? capWord(w) : w).join(" ");
+}
+function normDate(v) { const s = clean(v); if (isMissing(s)) return NA; const t = parseDT(s); return t ? fmtD(t) : NA; }
+function normTS(v) { const s = clean(v); if (isMissing(s)) return NA; const t = parseDT(s); return t ? fmtDT(t) : NA; }
+function normPhone(v) {
+  let s = clean(v).replace(/\.0$/, "");
+  if (isMissing(s)) return NA;
+  let d = s.replace(/\D/g, "");
+  if (d.length === 11 && d[0] === "1") d = d.slice(1);
+  if (d.length === 10) return `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`;
+  return d || NA;
+}
+const validPhone = (v) => v === NA || /^\(\d{3}\) \d{3}-\d{4}$/.test(v);
+function normZip(v) {
+  let s = clean(v).replace(/\.0$/, "");
+  if (isMissing(s)) return NA;
+  const d = s.replace(/\D/g, "");
+  if (d.length === 9) return d.slice(0, 5);
+  if (d.length >= 3 && d.length <= 5) return d.padStart(5, "0");
+  return NA;
+}
+const OWNER_WORDS = new Set(["owner","own","owns","owned","homeowner","home owner","yes","y","o"]);
+const RENTED_WORDS = new Set(["rented","rent","rents","renter","renting","tenant","lease","no","n","r"]);
+function normHome(v) {
+  const s = clean(v).toLowerCase();
+  if (isMissing(s)) return NA;
+  if (OWNER_WORDS.has(s)) return "Owner";
+  if (RENTED_WORDS.has(s)) return "Rented";
+  if (closest(s, [...OWNER_WORDS], 0.8)) return "Owner";
+  if (closest(s, [...RENTED_WORDS], 0.8)) return "Rented";
+  return NA;
+}
+function normInt(v) {
+  const s = clean(v);
+  if (isMissing(s)) return NA;
+  const f = parseFloat(s);
+  if (!isNaN(f) && /^[\d.]+$/.test(s)) return String(Math.trunc(f));
+  const d = s.replace(/\D/g, "");
+  return d || NA;
+}
+const CARRIER_KEYS = {};
+for (const [, canon] of CARRIER_PATTERNS) CARRIER_KEYS[canon.toLowerCase().replace(/[^a-z]/g, "")] = canon;
+Object.assign(CARRIER_KEYS, { gieco:"GEICO", prograssive:"Progressive", progresive:"Progressive", statefram:"State Farm", libertymutual:"Liberty Mutual" });
+function normCarrier(v) {
+  const s = clean(v);
+  if (isMissing(s)) return NA;
+  const key = s.toLowerCase().replace(/[^a-z]/g, "");
+  if (CARRIER_KEYS[key]) return CARRIER_KEYS[key];
+  const near = closest(key, Object.keys(CARRIER_KEYS), 0.75);
+  if (near) return CARRIER_KEYS[near];
+  return normName(s);
+}
+function normEmail(v) { const s = clean(v); return isMissing(s) ? NA : s.toLowerCase(); }
+function normText(v) { const s = clean(v); return isMissing(s) ? NA : s; }
+const NORM = { name:normName, date:normDate, datetime:normTS, phone:normPhone, zip:normZip, homeowner:normHome, int:normInt, carrier:normCarrier, email:normEmail, text:normText };
+
+// ---------- CSV / TSV parsing ----------
+function sniffDelim(text) {
+  const firstLines = text.slice(0, 4096).split(/\r?\n/).slice(0, 8).filter(l => l.trim());
+  let best = ",", bestScore = 0;
+  for (const d of [",", ";", "\t", "|"]) {
+    const counts = firstLines.map(l => l.split(d).length - 1);
+    const min = Math.min(...counts);
+    if (min > 0 && min > bestScore) { bestScore = min; best = d; }
+  }
+  return best;
+}
+function parseDelimited(text, delim) {
+  const rows = [], n = text.length;
+  let row = [], cell = "", inQ = false;
+  for (let i = 0; i < n; i++) {
+    const ch = text[i];
+    if (inQ) {
+      if (ch === '"') { if (text[i+1] === '"') { cell += '"'; i++; } else inQ = false; }
+      else cell += ch;
+    } else if (ch === '"') inQ = true;
+    else if (ch === delim) { row.push(cell); cell = ""; }
+    else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && text[i+1] === "\n") i++;
+      row.push(cell); rows.push(row); row = []; cell = "";
+    } else cell += ch;
+  }
+  if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+  const width = Math.max(1, ...rows.map(r => r.length));
+  return rows.map(r => { while (r.length < width) r.push(""); return r; });
+}
+
+// ---------- XLSX parsing (zip + xml, no libraries) ----------
+async function inflateRaw(bytes) {
+  const ds = new DecompressionStream("deflate-raw");
+  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+function xmlDecode(s) {
+  return s.replace(/&(#x?[0-9a-fA-F]+|amp|lt|gt|quot|apos);/g, (_, e) => {
+    if (e === "amp") return "&"; if (e === "lt") return "<"; if (e === "gt") return ">";
+    if (e === "quot") return '"'; if (e === "apos") return "'";
+    return String.fromCodePoint(e[1] === "x" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10));
+  });
+}
+async function readZip(buf) {
+  const dv = new DataView(buf), u8 = new Uint8Array(buf);
+  let eocd = -1;
+  for (let i = buf.byteLength - 22; i >= 0; i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error("not a zip");
+  const count = dv.getUint16(eocd + 10, true);
+  let off = dv.getUint32(eocd + 16, true);
+  const files = {};
+  const td = new TextDecoder();
+  for (let k = 0; k < count; k++) {
+    if (dv.getUint32(off, true) !== 0x02014b50) break;
+    const method = dv.getUint16(off + 10, true);
+    const csize = dv.getUint32(off + 20, true);
+    const nlen = dv.getUint16(off + 28, true), elen = dv.getUint16(off + 30, true), clen = dv.getUint16(off + 32, true);
+    const lho = dv.getUint32(off + 42, true);
+    const name = td.decode(u8.subarray(off + 46, off + 46 + nlen));
+    files[name] = { method, csize, lho };
+    off += 46 + nlen + elen + clen;
+  }
+  const get = async (name) => {
+    const f = files[name];
+    if (!f) return null;
+    const nl = dv.getUint16(f.lho + 26, true), el = dv.getUint16(f.lho + 28, true);
+    const start = f.lho + 30 + nl + el;
+    const data = u8.subarray(start, start + f.csize);
+    const out = f.method === 0 ? data : await inflateRaw(data);
+    return td.decode(out);
+  };
+  return { names: Object.keys(files), get };
+}
+function colIndex(ref) {
+  let n = 0;
+  for (const ch of ref) { const c = ch.charCodeAt(0); if (c < 65 || c > 90) break; n = n * 26 + (c - 64); }
+  return n - 1;
+}
+function serialToDate(v) {
+  const ms = Math.round((v - 25569) * 86400 * 1000);
+  const d = new Date(ms);
+  return { y:d.getUTCFullYear(), mo:d.getUTCMonth()+1, d:d.getUTCDate(), h:d.getUTCHours(), mi:d.getUTCMinutes() };
+}
+async function readXlsx(buf) {
+  const zip = await readZip(buf);
+  const sst = [];
+  const sstXml = await zip.get("xl/sharedStrings.xml");
+  if (sstXml) for (const m of sstXml.matchAll(/<si[\s>][\s\S]*?<\/si>|<si\/>/g)) {
+    let t = "";
+    for (const tm of m[0].matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)) t += xmlDecode(tm[1]);
+    sst.push(t);
+  }
+  const dateStyles = new Set();
+  const stylesXml = await zip.get("xl/styles.xml");
+  if (stylesXml) {
+    const custom = {};
+    for (const m of stylesXml.matchAll(/<numFmt[^>]*numFmtId="(\d+)"[^>]*formatCode="([^"]*)"/g)) custom[m[1]] = m[2];
+    const isDateFmt = (id) => {
+      const n = +id;
+      if ((n >= 14 && n <= 22) || (n >= 27 && n <= 36) || (n >= 45 && n <= 58)) return true;
+      const code = custom[id];
+      return !!code && /[ymdhs]/i.test(code.replace(/&quot;.*?&quot;|\[[^\]]*\]/g, "")) && !/^general$/i.test(code);
+    };
+    const xfsBlock = stylesXml.match(/<cellXfs[\s\S]*?<\/cellXfs>/);
+    if (xfsBlock) {
+      let idx = 0;
+      for (const m of xfsBlock[0].matchAll(/<xf\b[^>]*>/g)) {
+        const fmt = m[0].match(/numFmtId="(\d+)"/);
+        if (fmt && isDateFmt(fmt[1])) dateStyles.add(idx);
+        idx++;
+      }
+    }
+  }
+  const sheetNames = zip.names.filter(n => /^xl\/worksheets\/sheet\d+\.xml$/.test(n))
+    .sort((a, b) => +a.match(/\d+/)[0] - +b.match(/\d+/)[0]);
+  const allRows = [];
+  for (const sn of sheetNames) {
+    const xml = await zip.get(sn);
+    if (!xml) continue;
+    for (const rm of xml.matchAll(/<row[^>]*>([\s\S]*?)<\/row>/g)) {
+      const row = [];
+      let auto = 0;
+      for (const cm of rm[1].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+        const attrs = cm[1], inner = cm[2] || "";
+        const refM = attrs.match(/r="([A-Z]+)\d+"/);
+        const ci = refM ? colIndex(refM[1]) : auto;
+        auto = ci + 1;
+        const tM = attrs.match(/t="(\w+)"/), sM = attrs.match(/s="(\d+)"/);
+        let val = "";
+        const vM = inner.match(/<v>([\s\S]*?)<\/v>/);
+        if (tM && tM[1] === "inlineStr") {
+          const it = inner.match(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/);
+          val = it ? xmlDecode(it[1]) : "";
+        } else if (vM) {
+          val = xmlDecode(vM[1]);
+          if (tM && tM[1] === "s") val = sst[+val] ?? "";
+          else if ((!tM || tM[1] === "n") && sM && dateStyles.has(+sM[1]) && /^[\d.]+$/.test(val)) {
+            val = fmtDT(serialToDate(parseFloat(val)));
+          } else if (/^\d+\.0+$/.test(val)) val = val.replace(/\.0+$/, "");
+        }
+        row[ci] = val;
+      }
+      allRows.push(row);
+    }
+    if (allRows.length) allRows.push([]); // sheet boundary
+  }
+  const width = Math.max(1, ...allRows.map(r => r.length));
+  return allRows.map(r => { const o = []; for (let i = 0; i < width; i++) o.push(r[i] == null ? "" : String(r[i])); return o; });
+}
+
+// ---------- ingestion (content-detected) ----------
+async function fileToRows(buf) {
+  const u8 = new Uint8Array(buf);
+  if (u8[0] === 0x50 && u8[1] === 0x4b && u8[2] === 3 && u8[3] === 4) return readXlsx(buf);
+  if (u8[0] === 0xd0 && u8[1] === 0xcf) throw new Error("This is an old-format .xls file. Please re-save it as .xlsx or .csv and try again.");
+  let text;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
+  catch { text = new TextDecoder("windows-1252").decode(buf); }
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  if (!text.trim()) return [];
+  return parseDelimited(text, sniffDelim(text));
+}
+
+// ---------- structure pass ----------
+const cellAt = (rows, r, c) => (rows[r] && rows[r][c] != null) ? String(rows[r][c]).trim() : "";
+function buildAliasMap() {
+  const m = {};
+  for (const col of [...SCHEMA_COLS, ...AUX_COLS]) {
+    m[normHeader(col.name)] = col.name;
+    for (const a of col.aliases) m[normHeader(a)] = col.name;
+  }
+  return m;
+}
+const ALIASES = buildAliasMap();
+function findHeaderRow(rows) {
+  let best = null, bestHits = 0;
+  for (let r = 0; r < Math.min(rows.length, 10); r++) {
+    let hits = 0;
+    for (const v of rows[r]) {
+      if (!v) continue;
+      const n = normHeader(v);
+      if (ALIASES[n] || DROP_HEADERS.includes(n)) hits++;
+    }
+    if (hits > bestHits) { best = r; bestHits = hits; }
+  }
+  return bestHits >= 2 ? best : null;
+}
+function mapHeaders(headers) {
+  const mapping = {}, dropped = [], unmapped = [];  // mapping: colIdx -> target
+  const claimed = new Set();
+  headers.forEach((h, i) => {
+    const n = normHeader(h);
+    if (!n) return;
+    if (DROP_HEADERS.includes(n) || closest(n, DROP_HEADERS, 0.85)) { dropped.push(h); return; }
+    let target = ALIASES[n];
+    if (!target) { const c = closest(n, Object.keys(ALIASES), 0.8); if (c) target = ALIASES[c]; }
+    if (target && !claimed.has(target)) { mapping[i] = target; claimed.add(target); }
+    else unmapped.push({ h, i });
+  });
+  const compose = {};
+  for (const [target, partLists] of Object.entries(COMPOSE)) {
+    if (claimed.has(target)) continue;
+    const parts = partLists.map(list => {
+      const wanted = new Set(list.map(normHeader));
+      const found = unmapped.find(u => wanted.has(normHeader(u.h)));
+      return found ? found.i : null;
+    });
+    if (parts.filter(p => p !== null).length >= 2) {
+      compose[target] = parts;
+      claimed.add(target);
+      for (const p of parts) if (p !== null) {
+        const k = unmapped.findIndex(u => u.i === p);
+        if (k >= 0) unmapped.splice(k, 1);
+      }
+    }
+  }
+  return { mapping, dropped, unmapped: unmapped.map(u => u.h), compose };
+}
+
+// ---------- grid (card) files ----------
+const GRID_SKIP = /live\s*call\s*transfer|lead\s*source|^\s*information|^\s*\d+\s*(accidents?|tickets?|dui)\b|^\s*duration\b|only\s*home\s*insurance|homeowners?\s*quote|^\s*(more\s*than|more\s*thena)|^\s*years?\s*[.:]|^\s*\d+\s*(years?|yrs?|yr|yers)\.?\s*$|^\s*other\s*$|^\s*cars?\s*[:=]?\s*$/i;
+function looksLikeGrid(rows) {
+  let names = 0, dobs = 0;
+  for (const row of rows) for (const v of row) {
+    if (!v) continue;
+    if (/^\s*name\b/i.test(v)) names++;
+    else if (/^\s*d\.?\s*o\.?\s*b\.?\b/i.test(v)) dobs++;
+  }
+  return names >= 4 && dobs >= 4;
+}
+function gridHomeowner(t) {
+  const low = t.trim().toLowerCase().replace(/^[:= ]+/, "");
+  if (/^(renter|renting|rented|rent)\b/.test(low)) return "Rented";
+  const m = low.match(/^(home\s*own\w*|homeown\w*|homewoner|homeonwer|owner)\b\s*:?\s*=?\s*(.*)$/);
+  if (m) return /^no\b/.test(m[2]) ? "Rented" : "Owner";
+  if (/^single\s*family/.test(low)) return "Owner";
+  return null;
+}
+function cleanInsurance(t) {
+  return t.replace(/\b(insurance|ins|inc)\b\.?/gi, " ").replace(/\b(for|more\s+than|more\s+thena)\b/gi, " ")
+    .replace(/\d+\s*(years?|yrs?|yr|yers|months?)\b\.?/gi, " ").replace(/\b\d+\b/g, " ")
+    .replace(/[/:=.,]+/g, " ").trim();
+}
+function parseGridLead(cells) {
+  let name=null, dob=null, phone=null, city=null, state=null, zipc=null, home=null, autos=null, carrier=null, email=null;
+  const addr = [], vehicles = [];
+  for (const t of cells) {
+    let m = t.match(/^\s*e-?mail\b\s*[:=]?\s*(.*)$/i);
+    if (m) { if (!email && m[1].includes("@")) email = m[1].trim(); continue; }
+    if (GRID_SKIP.test(t)) continue;
+    m = t.match(/^\s*name\b\s*[:=]?\s*[:=]?\s*(.*)$/i);
+    if (m && /^\s*name\b/i.test(t)) { const v = m[1].replace(/^[ :=,]+|[ :=,]+$/g, ""); if (!name && v) name = v; continue; }
+    m = t.match(/^\s*d\.?\s*o\.?\s*b\.?\b\s*[:=]?\s*(.*)$/i);
+    if (m) { if (!dob && m[1].trim()) dob = m[1].replace(/;/g, "/").replace(/\s+/g, ""); continue; }
+    m = t.match(/^\s*(?:number|phone)\b\s*[:=]?\s*(.*)$/i);
+    if (m) { const d = m[1].replace(/\D/g, ""); if (!phone && d) phone = d; continue; }
+    m = t.match(/^\s*address\b\s*[:=]?\s*(.*)$/i);
+    if (m) { const v = m[1].replace(/^[ :=,]+|[ ,]+$/g, ""); if (v) addr.push(v); continue; }
+    m = t.match(/^\s*city\s*[:=]\s*=?\s*(.*)$/i);
+    if (m) { const v = m[1].replace(/^[ :=,]+|[ :=,]+$/g, ""); if (!city && v) city = v; continue; }
+    m = t.match(/^\s*state\s*[:=]\s*=?\s*(.*)$/i);
+    if (m) { const v = m[1].replace(/^[ :=,]+|[ :=,]+$/g, ""); if (!state && v) state = v; continue; }
+    m = t.match(/^\s*zip\s*_?\s*code?\s*[:=]\s*=?\s*(.*)$/i);
+    if (m) { const z = m[1].match(/\d{5}/); if (!zipc && z) zipc = z[0]; continue; }
+    const ho = gridHomeowner(t);
+    if (ho) { if (!home) home = ho; continue; }
+    m = t.match(/^\s*cars?\s*[:=]?\s*0?(\d)\s*$/i) || t.match(/^\s*0?(\d)\s*cars?\s*$/i);
+    if (m) { if (autos === null) autos = m[1]; continue; }
+    if (MAKES.test(t) && /(19|20)\d{2}/.test(t)) {
+      let v = t.replace(/^\s*cars?\b\s*[:=]?\s*/i, "").trim();
+      for (const [pat, canon] of CARRIER_PATTERNS) {
+        const cm = v.match(pat);
+        if (cm) { if (!carrier) carrier = canon; v = v.slice(0, cm.index).replace(/[ ,\/]+$/, ""); break; }
+      }
+      v = v.replace(/\binsurance\b\s*:?\s*$/i, "").replace(/[ ,\/]+$/, "").split("\n")[0].replace(/\s+/g, " ").trim();
+      if (v && vehicles.length < 4) vehicles.push(v);
+      continue;
+    }
+    let matched = false;
+    for (const [pat, canon] of CARRIER_PATTERNS) if (pat.test(t)) { if (!carrier) carrier = canon; matched = true; break; }
+    if (matched) continue;
+    m = t.match(/^\s*(?:insurance|inc)\b\s*[:=\/]?\s*(.*)$/i);
+    if (m) { const c = cleanInsurance(m[1]); if (!carrier && c) carrier = c; continue; }
+    if (/^(ga|georgia)\.?$/i.test(t.replace(/[ ,]+$/, ""))) { if (!state) state = "GA"; continue; }
+    const gz = t.match(/\b(3[01]\d{3})\b/);
+    if (gz && /[A-Za-z]/.test(t)) { addr.push(t.replace(/[ ,]+$/, "")); if (!zipc) zipc = gz[1]; continue; }
+    if (/^\d+\s+\S+/.test(t)) { addr.push(t.replace(/[ ,]+$/, "")); continue; }
+  }
+  if (!name) return null;
+  if (state && /^(ga|georgia)\.?$/i.test(state)) state = "GA";
+  const parts = addr.filter(p => p.trim()).slice(0, 3);
+  if (city && !parts.some(p => p.toLowerCase().includes(city.toLowerCase()))) parts.push(city);
+  if (state && !parts.some(p => new RegExp("\\b" + state + "\\b", "i").test(p))) parts.push(state);
+  if (!zipc) for (const p of addr) { const z = p.match(/\b(3[01]\d{3})\b/); if (z) { zipc = z[1]; break; } }
+  return { "Full Name":name, "Email":email||"", "Date of Birth":dob||"", "Phone Number":phone||"",
+    "Address":parts.map(x => x.replace(/^[ ,]+|[ ,]+$/g, "")).filter(Boolean).join(", "),
+    "ZIP Code":zipc||"", "Homeowner":home||"", "Autos":autos !== null ? autos : (vehicles.length ? String(vehicles.length) : ""),
+    "Current Insurance":carrier||"", "Cars Make and Model":vehicles.join(" / ") };
+}
+function parseGrid(rows) {
+  const ncols = Math.max(...rows.map(r => r.length));
+  const banners = [];
+  rows.forEach((row, r) => {
+    let hits = 0;
+    for (const v of row) if (v && String(v).toLowerCase().includes("live call transfer")) hits++;
+    if (hits >= 3) banners.push(r);
+  });
+  const starts = [0, ...banners.map(b => b + 1)], ends = [...banners, rows.length];
+  const leads = [];
+  for (let bi = 0; bi < starts.length; bi++) {
+    if (ends[bi] <= starts[bi]) continue;
+    for (let c = 0; c < ncols; c++) {
+      const cells = [];
+      for (let r = starts[bi]; r < ends[bi]; r++) { const v = cellAt(rows, r, c); if (v) cells.push(v); }
+      if (!cells.length) continue;
+      const lead = parseGridLead(cells);
+      if (lead) leads.push(lead);
+    }
+  }
+  return { leads, skipped: banners.length };
+}
+
+// ---------- headerless inference ----------
+function inferFrame(rows) {
+  const data = rows.filter(r => r.filter(v => v && String(v).trim()).length >= 3);
+  const skipped = rows.length - data.length;
+  if (!data.length) return { leads: [], skipped };
+  const ncols = Math.max(...data.map(r => r.length));
+  const samples = [];
+  for (let c = 0; c < ncols; c++) {
+    const vals = [];
+    for (const r of data) { const v = r[c] != null ? String(r[c]).trim() : ""; if (v && !isMissing(v)) vals.push(v); if (vals.length >= 200) break; }
+    samples.push(vals);
+  }
+  const ratio = (c, pred) => samples[c].length ? samples[c].filter(pred).length / samples[c].length : 0;
+  const isPhone = v => { const d = v.replace(/\D/g, ""); return d.length === 10 || (d.length === 11 && d[0] === "1"); };
+  const isZip = v => /^\d{5}(-\d{4})?$/.test(v);
+  const isDate = v => /[\/\-]/.test(v) && parseDT(v) !== null;
+  const isCarrier = v => { const k = v.toLowerCase().replace(/[^a-z]/g, ""); return !!CARRIER_KEYS[k] || !!closest(k, Object.keys(CARRIER_KEYS), 0.8); };
+  const HOME_EXPL = new Set(["own","owner","owned","owns","homeowner","rent","rented","renter","rents"]);
+  const isAlpha = v => v.length <= 40 && /^[A-Za-z][A-Za-z .,'\-]*$/.test(v);
+  const used = new Set(), single = {};
+  const claim = (target, pred, thr, best) => {
+    let pick = null, pickR = 0;
+    for (let c = 0; c < ncols; c++) {
+      if (used.has(c)) continue;
+      const r = ratio(c, pred);
+      if (r >= thr) { if (!best) { pick = c; break; } if (r > pickR) { pick = c; pickR = r; } }
+    }
+    if (pick !== null) { single[target] = pick; used.add(pick); }
+    return pick;
+  };
+  const pc = claim("Phone Number", isPhone, 0.7);
+  if (pc !== null) for (let c = 0; c < ncols; c++) if (!used.has(c) && ratio(c, isPhone) >= 0.7) used.add(c);
+  claim("Email", v => v.includes("@") && v.split("@").pop().includes("."), 0.5);
+  claim("ZIP Code", isZip, 0.7, true);
+  const dateCols = [];
+  for (let c = 0; c < ncols; c++) if (!used.has(c) && ratio(c, isDate) >= 0.7) dateCols.push(c);
+  if (dateCols.length) {
+    const medYear = (c) => { const ys = samples[c].slice(0, 50).map(v => parseDT(v)).filter(Boolean).map(t => t.y).sort((a,b)=>a-b); return ys.length ? ys[Math.floor(ys.length/2)] : 9999; };
+    dateCols.sort((a, b) => medYear(a) - medYear(b));
+    dateCols.forEach(c => used.add(c));
+    const dobs = dateCols.filter(c => medYear(c) < 2015), recents = dateCols.filter(c => medYear(c) >= 2015);
+    if (dobs.length) single["Date of Birth"] = dobs[0];
+    if (recents.length) single["Timestamp"] = recents[0];
+  }
+  claim("Autos", v => /^\d$/.test(v), 0.7);
+  claim("Current Insurance", isCarrier, 0.5);
+  claim("Homeowner", v => HOME_EXPL.has(v.toLowerCase()), 0.6);
+  const vehicleCols = [];
+  for (let c = 0; c < ncols && vehicleCols.length < 3; c++)
+    if (!used.has(c) && ratio(c, v => /^(19|20)\d{2}\s+\S/.test(v)) >= 0.5) { vehicleCols.push(c); used.add(c); }
+  const nameCols = [];
+  for (let c = 0; c < ncols; c++) {
+    if (used.has(c) || ratio(c, isAlpha) < 0.8) continue;
+    nameCols.push(c);
+    if (c + 1 < ncols && !used.has(c + 1) && ratio(c + 1, isAlpha) >= 0.8) nameCols.push(c + 1);
+    break;
+  }
+  nameCols.forEach(c => used.add(c));
+  const addrCols = [];
+  for (let c = 0; c < ncols; c++) {
+    if (used.has(c) || ratio(c, v => /^\d+\s+\S+/.test(v)) < 0.6) continue;
+    addrCols.push(c); used.add(c);
+    let nxt = c + 1;
+    if (nxt < ncols && !used.has(nxt) && ratio(nxt, isAlpha) >= 0.8) { addrCols.push(nxt); used.add(nxt); nxt++; }
+    if (nxt < ncols && !used.has(nxt) && ratio(nxt, v => /^[A-Za-z]{2}$/.test(v)) >= 0.8) { addrCols.push(nxt); used.add(nxt); }
+    break;
+  }
+  const leads = data.map(r => {
+    const g = c => (r[c] != null ? String(r[c]).trim() : "");
+    const lead = {};
+    for (const [target, c] of Object.entries(single)) lead[target] = g(c);
+    const jn = (cols, sep) => cols.map(g).filter(v => v && !isMissing(v)).join(sep);
+    if (nameCols.length) lead["Full Name"] = jn(nameCols, " ");
+    if (addrCols.length) lead["Address"] = jn(addrCols, ", ");
+    if (vehicleCols.length) lead["Cars Make and Model"] = jn(vehicleCols, " / ");
+    return lead;
+  });
+  return { leads, skipped };
+}
+
+// ---------- organize (normalize + dedupe + diffs) ----------
+function organizeRows(rows) {
+  const report = { input_rows:0, output_rows:0, duplicates_removed:0, removed_duplicates:[],
+    empty_rows_skipped:0, skipped_non_lead_rows:0, header_inferred:false, invalid_phone_rows:[],
+    column_issues:{}, dropped_headers:[], unmapped_headers:[], row_diffs:[] };
+  for (const c of SCHEMA_COLS) report.column_issues[c.name] = { fixed:0, na:0 };
+
+  const nonBlank = rows.filter(r => r.some(v => v && String(v).trim()));
+  report.skipped_non_lead_rows = rows.length - nonBlank.length;
+  if (!nonBlank.length) return { records:[], aux:[], report };
+
+  let rawRecords;
+  if (looksLikeGrid(nonBlank)) {
+    const g = parseGrid(nonBlank);
+    rawRecords = g.leads;
+    report.header_inferred = true;
+    report.skipped_non_lead_rows += g.skipped;
+  } else {
+    const hr = findHeaderRow(nonBlank);
+    if (hr !== null) {
+      const { mapping, dropped, unmapped, compose } = mapHeaders(nonBlank[hr].map(v => String(v)));
+      report.dropped_headers = dropped;
+      report.unmapped_headers = unmapped;
+      report.skipped_non_lead_rows += hr;
+      rawRecords = nonBlank.slice(hr + 1).map(r => {
+        const rec = {};
+        for (const [idx, target] of Object.entries(mapping)) rec[target] = r[idx] != null ? String(r[idx]) : "";
+        for (const [target, parts] of Object.entries(compose)) {
+          const sep = (SCHEMA_COLS.find(c => c.name === target) || {}).type === "name" ? " " : ", ";
+          rec[target] = parts.filter(p => p !== null)
+            .map(p => (r[p] != null ? String(r[p]).trim() : "")).filter(v => v && !isMissing(v)).join(sep);
+        }
+        return rec;
+      });
+    } else {
+      const inf = inferFrame(nonBlank);
+      rawRecords = inf.leads;
+      report.header_inferred = true;
+      report.skipped_non_lead_rows += inf.skipped;
+    }
+  }
+  report.input_rows = rawRecords.length;
+
+  const types = {};
+  for (const c of [...SCHEMA_COLS, ...AUX_COLS]) types[c.name] = c.type;
+  let items = rawRecords.map((raw, src) => {
+    const rec = {}, auxRec = {};
+    for (const col of SCHEMA_COLS) {
+      const rv = raw[col.name] != null ? String(raw[col.name]) : "";
+      const val = NORM[col.type](rv);
+      if (val === NA) report.column_issues[col.name].na++;
+      else if (rv.trim() !== val) report.column_issues[col.name].fixed++;
+      if (rv.trim() && rv.trim() !== val)
+        report.row_diffs.push({ src, field:col.name, original:rv.trim(), new:val,
+          reason: val === NA ? "unparseable — set to NA" : DIFF_REASONS[col.type] });
+      rec[col.name] = val;
+    }
+    for (const col of AUX_COLS) if (raw[col.name] != null && String(raw[col.name]).trim() !== "")
+      auxRec[col.name] = NORM[col.type](String(raw[col.name]));
+    return { src, rec, aux: auxRec };
+  });
+
+  const allNaBefore = items.length;
+  items = items.filter(it => SCHEMA_COLS.some(c => it.rec[c.name] !== NA));
+  report.empty_rows_skipped = allNaBefore - items.length;
+
+  const seen = new Set();
+  const kept = [];
+  for (const it of items) {
+    const keyParts = DEDUPE_ON.map(k => it.rec[k]);
+    if (keyParts.every(v => v !== NA)) {
+      const key = keyParts.map(v => v.toLowerCase().trim()).join("|");
+      if (seen.has(key)) {
+        report.duplicates_removed++;
+        report.removed_duplicates.push({ "Full Name": it.rec["Full Name"], "Phone Number": it.rec["Phone Number"] });
+        continue;
+      }
+      seen.add(key);
+    }
+    kept.push(it);
+  }
+
+  const srcToRow = new Map(kept.map((it, i) => [it.src, i + 1]));
+  report.row_diffs = report.row_diffs.filter(d => srcToRow.has(d.src))
+    .map(d => ({ row: srcToRow.get(d.src), field: d.field, original: d.original, new: d.new, reason: d.reason }));
+  kept.forEach((it, i) => { if (!validPhone(it.rec["Phone Number"])) report.invalid_phone_rows.push(i); });
+  report.output_rows = kept.length;
+  return { records: kept.map(it => it.rec), aux: kept.map(it => it.aux), report };
+}
+
+// ---------- refinement ----------
+function refine(records, aux, report) {
+  const present = SCHEMA_COLS.filter(c => records.some(r => r[c.name] !== NA)).map(c => c.name.toLowerCase());
+  for (const a of AUX_COLS) if (aux.some(x => x[a.name] && x[a.name] !== NA)) present.push(a.name.toLowerCase());
+  present.push(...report.unmapped_headers.map(h => String(h).toLowerCase()));
+  let vertical = "general", bestHits = 0;
+  for (const [v, sigs] of Object.entries(VERTICALS)) {
+    const hits = sigs.filter(s => present.includes(s)).length;
+    if (hits > bestHits) { vertical = v; bestHits = hits; }
+  }
+  report.vertical = bestHits >= 2 ? vertical : "general";
+
+  const violations = [], corrections = [];
+  records.forEach((rec, i) => {
+    const row = i + 1, ax = aux[i] || {};
+    const email = ax["Email"];
+    if (email && email !== NA) {
+      if (!/^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/.test(email)) {
+        violations.push({ row, rule:"email_invalid", fields:["Email"], message:`not a valid email: ${email}` });
+      } else {
+        const domain = email.split("@").pop();
+        if (!EMAIL_DOMAINS.includes(domain)) {
+          const near = closest(domain, EMAIL_DOMAINS, 0.75);
+          if (near) {
+            const conf = sim(domain, near);
+            const fixed = email.split("@")[0] + "@" + near;
+            const applied = conf >= 0.85;
+            if (applied) ax["Email"] = fixed;
+            corrections.push({ row, field:"Email", original:email, suggested:fixed, applied, confidence:+conf.toFixed(2) });
+            violations.push({ row, rule:"email_domain_typo", fields:["Email"], message:`${domain} looks like ${near}` });
+          }
+        }
+      }
+    }
+    const age = ageFrom(rec["Date of Birth"]);
+    if (age !== null) {
+      if (age < 16 || age > 105)
+        violations.push({ row, rule:"dob_implausible", fields:["Date of Birth"], message:`derived age ${age} outside 16-105` });
+      const stated = parseInt(ax["Age"], 10);
+      if (!isNaN(stated) && Math.abs(stated - age) > 2)
+        violations.push({ row, rule:"dob_vs_age", fields:["Date of Birth","Age"], message:`DOB implies ${age} but Age column says ${stated}` });
+      const occ = String(ax["Occupation"] || "").toLowerCase();
+      if (occ.includes("student") && age > 60)
+        violations.push({ row, rule:"dob_vs_occupation", fields:["Date of Birth","Occupation"], message:`occupation 'student' but derived age ${age}` });
+      if (occ.includes("retired") && age < 40)
+        violations.push({ row, rule:"dob_vs_occupation", fields:["Date of Birth","Occupation"], message:`occupation 'retired' but derived age ${age}` });
+    }
+    const nm = rec["Full Name"];
+    if (nm !== NA && (/\d/.test(nm) || nm.replace(/ /g, "").length < 2))
+      violations.push({ row, rule:"name_suspicious", fields:["Full Name"], message:`name looks malformed: ${nm}` });
+  });
+  for (const idx of report.invalid_phone_rows)
+    violations.push({ row: idx + 1, rule:"phone_invalid", fields:["Phone Number"], message:"phone number is not 10 digits" });
+
+  // fuzzy duplicate groups: block on phone/email, nickname-aware name compare
+  const blocks = {};
+  records.forEach((rec, i) => {
+    const d = rec["Phone Number"] !== NA ? rec["Phone Number"].replace(/\D/g, "") : "";
+    if (d) (blocks["p" + d] = blocks["p" + d] || []).push(i);
+    const e = (aux[i] || {})["Email"];
+    if (e && e !== NA && e.includes("@") && !e.startsWith("no@")) (blocks["e" + e] = blocks["e" + e] || []).push(i);
+  });
+  const parent = records.map((_, i) => i);
+  const find = x => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  const canonName = (n) => {
+    const parts = String(n).toLowerCase().replace(/[^a-z ]/g, "").trim().split(/\s+/);
+    if (parts.length && NICKNAMES[parts[0]]) parts[0] = NICKNAMES[parts[0]];
+    return parts.join(" ");
+  };
+  const matchedOn = {};
+  for (const [key, rowsIdx] of Object.entries(blocks)) {
+    if (rowsIdx.length < 2) continue;
+    for (let x = 0; x < rowsIdx.length; x++) for (let y = x + 1; y < rowsIdx.length; y++) {
+      const a = rowsIdx[x], b = rowsIdx[y];
+      const na_ = records[a]["Full Name"], nb = records[b]["Full Name"];
+      if (na_ === NA || nb === NA) continue;
+      const ca = canonName(na_), cb = canonName(nb);
+      if (ca === cb || sim(ca, cb) >= 0.85) {
+        const ra = find(a), rb = find(b);
+        if (ra !== rb) parent[rb] = ra;
+        if (!(Math.min(a, b) in matchedOn)) matchedOn[Math.min(a, b)] = key[0] === "p" ? "shared phone" : "shared email";
+      }
+    }
+  }
+  const clusters = {};
+  records.forEach((_, i) => { const r = find(i); (clusters[r] = clusters[r] || []).push(i); });
+  const groups = [], rowToGroup = {};
+  let gid = 0;
+  for (const members of Object.values(clusters)) {
+    if (members.length < 2) continue;
+    gid++;
+    members.forEach(m => rowToGroup[m + 1] = gid);
+    groups.push({ group:gid, rows:members.map(m => m + 1), names:members.map(m => records[m]["Full Name"]),
+      matched_on: matchedOn[Math.min(...members)] || "phone/email block" });
+  }
+
+  const totalWeight = Object.values(WEIGHTS).reduce((a, b) => a + b, 0);
+  const penByRow = {};
+  for (const v of violations) (penByRow[v.row] = penByRow[v.row] || []).push([v.rule, PENALTIES[v.rule] || 5]);
+  for (const row of Object.keys(rowToGroup)) (penByRow[row] = penByRow[row] || []).push(["duplicate_group", PENALTIES.duplicate_group]);
+  const scores = records.map((rec, i) => {
+    const row = i + 1;
+    const filled = Object.entries(WEIGHTS).reduce((a, [c, w]) => a + (rec[c] !== NA ? w : 0), 0);
+    const completeness = Math.round(100 * filled / totalWeight);
+    const pens = penByRow[row] || [];
+    const penalty = pens.reduce((a, [, p]) => a + p, 0);
+    const score = Math.max(0, Math.min(100, completeness - penalty));
+    return { row, name: rec["Full Name"], completeness, penalty,
+      issues: [...new Set(pens.map(p => p[0]))].sort(), score, review: score < REVIEW_THRESHOLD };
+  });
+  report.violations = violations.sort((a, b) => a.row - b.row || a.rule.localeCompare(b.rule));
+  report.email_corrections = corrections;
+  report.duplicate_groups = groups;
+  report.scores = scores;
+  report.review_rows = scores.filter(s => s.review).map(s => s.row);
+  report.avg_score = scores.length ? Math.round(scores.reduce((a, s) => a + s.score, 0) / scores.length) : 0;
+  return report;
+}
+
+async function processBuffer(buf) {
+  const rows = await fileToRows(buf);
+  const { records, aux, report } = organizeRows(rows);
+  refine(records, aux, report);
+  return { records, aux, report };
+}
+// ============================ CORE_END ============================
+
+// ---------- UI (browser only) ----------
+if (typeof document !== "undefined") (function () {
+  const $ = id => document.getElementById(id);
+  const dz = $("dropzone"), input = $("fileinput");
+  let lastResult = null, lastName = "leads";
+
+  dz.addEventListener("click", () => input.click());
+  ["dragover","dragenter"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add("hover"); }));
+  ["dragleave","drop"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove("hover"); }));
+  dz.addEventListener("drop", e => { if (e.dataTransfer.files.length) handle(e.dataTransfer.files[0]); });
+  input.addEventListener("change", () => { if (input.files.length) handle(input.files[0]); });
+
+  async function handle(file) {
+    $("err").textContent = "";
+    $("busy").style.display = "block";
+    $("results").style.display = "none";
+    try {
+      if (typeof DecompressionStream === "undefined" && /\.(xlsx|xlsm)$/i.test(file.name))
+        throw new Error("This browser is too old for Excel files here — use Chrome/Edge/Firefox from 2021+, or save the file as CSV.");
+      lastName = file.name.replace(/\.[^.]+$/, "");
+      const buf = await file.arrayBuffer();
+      lastResult = await processBuffer(buf);
+      render(lastResult);
+    } catch (e) {
+      $("err").textContent = "Could not process that file: " + e.message;
+    } finally {
+      $("busy").style.display = "none";
+    }
+  }
+
+  function csvEscape(v) { return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+  function toCSV(headers, rows) {
+    return [headers.map(csvEscape).join(","), ...rows.map(r => r.map(v => csvEscape(String(v))).join(","))].join("\n");
+  }
+  function download(name, text, mime) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type: mime }));
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+  $("dl-clean").addEventListener("click", () => {
+    const cols = SCHEMA_COLS.map(c => c.name);
+    download(lastName + "_organized.csv", toCSV(cols, lastResult.records.map(r => cols.map(c => r[c]))), "text/csv");
+  });
+  $("dl-diff").addEventListener("click", () => {
+    download(lastName + "_changes.csv", toCSV(["row","field","original","new","reason"],
+      lastResult.report.row_diffs.map(d => [d.row, d.field, d.original, d.new, d.reason])), "text/csv");
+  });
+  $("dl-errors").addEventListener("click", () => {
+    const r = lastResult.report;
+    const log = { vertical:r.vertical, avg_score:r.avg_score, scores:r.scores, review_rows:r.review_rows,
+      violations:r.violations, email_corrections:r.email_corrections, duplicate_groups:r.duplicate_groups,
+      removed_duplicates:r.removed_duplicates, duplicates_removed:r.duplicates_removed,
+      invalid_phone_rows:r.invalid_phone_rows, unmapped_headers:r.unmapped_headers,
+      dropped_headers:r.dropped_headers, skipped_non_lead_rows:r.skipped_non_lead_rows,
+      header_inferred:r.header_inferred, input_rows:r.input_rows, output_rows:r.output_rows };
+    download(lastName + "_errors.json", JSON.stringify(log, null, 2), "application/json");
+  });
+
+  function stat(value, label) {
+    const d = document.createElement("div");
+    d.className = "stat";
+    const b = document.createElement("b"); b.textContent = value;
+    const s = document.createElement("span"); s.textContent = label;
+    d.append(b, s);
+    return d;
+  }
+  function note(text) {
+    const p = document.createElement("p");
+    p.className = "note"; p.textContent = text;
+    return p;
+  }
+  function render({ records, report }) {
+    const cards = $("statcards");
+    cards.replaceChildren(
+      stat(report.input_rows, "rows in"), stat(report.output_rows, "clean leads out"),
+      stat(report.avg_score, "avg quality score"), stat(report.review_rows.length, "need manual review"),
+      stat(report.duplicates_removed, "duplicates removed"), stat(report.duplicate_groups.length, "possible dup groups"),
+      stat(report.invalid_phone_rows.length, "invalid phones"), stat(report.vertical, "detected vertical"));
+    const notes = $("notes");
+    notes.replaceChildren();
+    if (report.duplicate_groups.length)
+      notes.append(note("Possible duplicates (kept, review): " + report.duplicate_groups.map(g => `rows ${g.rows.join(" & ")} (${g.names.join(" / ")})`).join("; ")));
+    if (report.email_corrections.length)
+      notes.append(note("Email fixes: " + report.email_corrections.map(c => `row ${c.row}: ${c.original} -> ${c.suggested} (${c.applied ? "applied" : "suggestion"})`).join(", ")));
+    if (report.removed_duplicates.length)
+      notes.append(note("Removed duplicates: " + report.removed_duplicates.map(d => `${d["Full Name"]} (${d["Phone Number"]})`).join(", ")));
+    if (report.skipped_non_lead_rows)
+      notes.append(note(report.skipped_non_lead_rows + " non-lead row(s) (blank/legend/junk) skipped."));
+    if (report.header_inferred)
+      notes.append(note("No header row found — column meanings were inferred from the data. Double-check the result."));
+    if (report.unmapped_headers.length)
+      notes.append(note("Ignored (unrecognized) columns: " + report.unmapped_headers.join(", ")));
+    if (report.dropped_headers.length)
+      notes.append(note("Dropped columns: " + report.dropped_headers.join(", ")));
+
+    const cols = SCHEMA_COLS.map(c => c.name);
+    const thead = document.querySelector("#leads thead");
+    const tbody = document.querySelector("#leads tbody");
+    thead.replaceChildren();
+    const hr = document.createElement("tr");
+    [...cols, "Score"].forEach((c, i) => {
+      const th = document.createElement("th");
+      th.textContent = c;
+      th.addEventListener("click", () => sortBy(i));
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    tbody.replaceChildren();
+    const invalid = new Set(report.invalid_phone_rows);
+    const scoreByRow = new Map(report.scores.map(s => [s.row, s]));
+    const cap = Math.min(records.length, 500);
+    for (let i = 0; i < cap; i++) {
+      const tr = document.createElement("tr");
+      const s = scoreByRow.get(i + 1) || {};
+      if (invalid.has(i)) tr.className = "invalid";
+      else if (s.review) tr.className = "review";
+      for (const c of cols) { const td = document.createElement("td"); td.textContent = records[i][c]; tr.appendChild(td); }
+      const td = document.createElement("td"); td.textContent = (s.score ?? "") + (s.review ? " ⚠" : ""); tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+    $("tabletitle").textContent = `3. Organized leads (${records.length}${records.length > cap ? ", showing first " + cap : ""}) — click a header to sort`;
+    $("results").style.display = "block";
+  }
+  let sortAsc = {};
+  function sortBy(i) {
+    const tbody = document.querySelector("#leads tbody");
+    const rows = [...tbody.rows];
+    const asc = !(sortAsc[i] = !sortAsc[i]) ? false : true;
+    rows.sort((a, b) => {
+      const x = a.cells[i].textContent, y = b.cells[i].textContent;
+      const nx = parseFloat(x.replace(/[^\d.-]/g, "")), ny = parseFloat(y.replace(/[^\d.-]/g, ""));
+      const cmp = (!isNaN(nx) && !isNaN(ny)) ? nx - ny : x.localeCompare(y);
+      return asc ? cmp : -cmp;
+    });
+    rows.forEach(r => tbody.appendChild(r));
+  }
+})();
+</script>
+</body>
+</html>
