@@ -9,6 +9,7 @@ from flask import Flask, abort, redirect, render_template, request, send_file, u
 from werkzeug.utils import secure_filename
 
 from organizer import load_schema, organize_file
+from pretty_export import build_pretty_workbook
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 UPLOADS = os.path.join(BASE, "uploads")
@@ -132,6 +133,8 @@ def organize():
         rows.append({"cells": cells, "score": s.get("score", ""),
                      "review": s.get("review", False), "invalid": pos in invalid})
 
+    build_pretty_workbook(list(df.columns), rows, os.path.join(OUTPUT, f"pretty_{token}.xlsx"))
+
     result = {
         "columns": list(df.columns),
         "rows": rows,
@@ -153,6 +156,11 @@ def _serve(token, pattern, download_name):
 @app.route("/download/<token>")
 def download(token):
     return _serve(token, "organized_{token}.csv", "organized_leads.csv")
+
+
+@app.route("/xlsx/<token>")
+def download_xlsx(token):
+    return _serve(token, "pretty_{token}.xlsx", "organized_leads.xlsx")
 
 
 @app.route("/diff/<token>")
