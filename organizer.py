@@ -512,6 +512,51 @@ def _parse_grid(raw):
     return frame, len(banner_rows)
 
 
+# ------------------------------------------ linear (plain-text) card files
+
+_LINEAR_BANNER_RE = re.compile(r"^\s*live\s*call\s*transfer\s*:?\s*$", re.I)
+_LINEAR_SEP_RE = re.compile(r"^_{5,}$")
+
+
+def _looks_like_linear_cards(text):
+    """A 'linear' card file: each lead is one label-per-line block ('Name:',
+    'DOB:', ...) in a plain text stream, one lead after another — as opposed
+    to the grid layout's one-lead-per-spreadsheet-column. Has no reliable
+    delimiter, so it must be detected (and parsed) before any CSV/delimiter
+    sniffing runs on it."""
+    names = dobs = 0
+    for line in text.splitlines():
+        s = line.strip()
+        if re.match(r"^\s*name\b\s*[:=]", s, re.I):
+            names += 1
+        elif re.match(r"^\s*d\.?\s*o\.?\s*b\.?\b\s*[:=]", s, re.I):
+            dobs += 1
+    return names >= 4 and dobs >= 4
+
+
+def _parse_linear_cards(text):
+    """Split into blocks on banner/underscore-rule lines, then reuse the
+    same per-line field extraction as the grid parser (each text line here
+    plays the role of one grid cell)."""
+    blocks, current = [], []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if _LINEAR_BANNER_RE.match(line) or _LINEAR_SEP_RE.match(line):
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        if line:
+            current.append(line)
+    if current:
+        blocks.append(current)
+
+    leads = [lead for cells in blocks
+             for lead in [_parse_grid_lead(cells)] if lead]
+    frame = pd.DataFrame(leads)
+    return frame, len(blocks)
+
+
 # ------------------------------------------------- headerless files
 
 def _find_header_row(raw, schema):
@@ -722,7 +767,10 @@ _XLS_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # OLE2 (legacy .xls)
 
 
 def _read_raw(path):
-    """Read any tabular file into a raw headerless frame.
+    """Read any tabular file into a raw headerless frame, plus the decoded
+    text for text files (None for Excel) — the text lets callers detect a
+    non-tabular layout (e.g. linear card sheets) before delimiter-sniffing
+    has a chance to mangle it.
 
     File type is detected from CONTENT, not extension — a .csv that is
     really an XLSX parses fine. Text files get encoding + delimiter
@@ -733,7 +781,7 @@ def _read_raw(path):
     if head[:4] == _XLSX_MAGIC or head == _XLS_MAGIC:
         sheets = pd.read_excel(path, sheet_name=None, header=None, dtype=str)
         frames = [f for f in sheets.values() if not f.empty]
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        return (pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()), None
 
     with open(path, "rb") as f:
         data = f.read()
@@ -745,7 +793,7 @@ def _read_raw(path):
         except UnicodeDecodeError:
             continue
     if text is None or not text.strip():
-        return pd.DataFrame()
+        return pd.DataFrame(), None
 
     sep = ","
     try:
@@ -753,22 +801,30 @@ def _read_raw(path):
     except _csv.Error:
         pass
     try:
-        return pd.read_csv(io.StringIO(text), dtype=str, header=None,
-                           skip_blank_lines=False, sep=sep, engine="python")
-    except pd.errors.EmptyDataError:
-        return pd.DataFrame()
+        raw = pd.read_csv(io.StringIO(text), dtype=str, header=None,
+                          skip_blank_lines=False, sep=sep, engine="python")
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        raw = pd.DataFrame()
+    return raw, text
 
 
 def organize_file(path, schema):
-    raw = _read_raw(path)
-    blank_rows = 0
-    if not raw.empty:
-        blank = raw.isna().all(axis=1)
-        blank_rows = int(blank.sum())
-        raw = raw[~blank].reset_index(drop=True)
-    if raw.empty:
-        return organize_dataframe(pd.DataFrame(), schema)
-    df, inferred, skipped = _frame_from_raw(raw, schema)
+    raw, text = _read_raw(path)
+
+    if text is not None and _looks_like_linear_cards(text):
+        df, blocks = _parse_linear_cards(text)
+        inferred, blank_rows = True, 0
+        skipped = max(blocks - len(df), 0)  # preamble/junk blocks with no lead
+    else:
+        blank_rows = 0
+        if not raw.empty:
+            blank = raw.isna().all(axis=1)
+            blank_rows = int(blank.sum())
+            raw = raw[~blank].reset_index(drop=True)
+        if raw.empty:
+            return organize_dataframe(pd.DataFrame(), schema)
+        df, inferred, skipped = _frame_from_raw(raw, schema)
+
     out, report = organize_dataframe(df, schema)
     report["header_inferred"] = inferred
     report["skipped_non_lead_rows"] = blank_rows + skipped

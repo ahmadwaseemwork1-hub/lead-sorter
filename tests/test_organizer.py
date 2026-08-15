@@ -336,6 +336,88 @@ def test_grid_file_flattened(tmp_path):
     assert third["Homeowner"] == "Rented"
 
 
+# 22. linear card file (plain text, one label per LINE, leads separated by a
+#     banner or an underscore rule — no delimiter at all, so it must be
+#     detected before any CSV/delimiter sniffing runs on it)
+def test_linear_card_file_flattened(tmp_path):
+    txt = (
+        "ITS JAKE FROM ALLSTATE\n\n"
+        "Live Call Transfer :\n\n"
+        "Name: Linda Lineartest\n"
+        "DOB: 09/28/1937\n\n"
+        "Number: 6787216991\n\n"
+        "Email: NA\n\n"
+        "Address: 32 Berkshire Dr\n"
+        "City:      Cartersville\n"
+        "State:    GA\n"
+        "Zip Code:   30120\n\n"
+        "Information:\n\n"
+        "0 Accident\n0 Tickets\n\n"
+        "Homeowner\n\n"
+        "1 CAR\n2015 DODGE Journey\n\n"
+        "Insurance:\nstate farm Ins. for more than 10 years.\n\n"
+        "Lead Source: Unknown\n\n"
+        "_________________________________________\n\n"
+        "Live Call Transfer\n\n"
+        "Name: Gladys Lineartest\n"
+        "DOB: 08/08/1940\n\n"
+        "Spouse: N/A\nDOB: N/A\n\n"
+        "Number: 6783993458\n"
+        "Email: N/A\n\n"
+        "Address: 3276 Northside Pkwy NW\n"
+        "City: Atlanta\n"
+        "State: GA\n"
+        "Zip Code: 30327\n\n"
+        "Information:\n\n"
+        "No Accidents\nNo Tickets\n\n"
+        "Renter\n\n"
+        "02 Car\n2014 GMC Sierra\n2016 Toyota Camry\n\n"
+        "Insurance:\nProgressive Ins. about 2 years.\n\n"
+        "Lead Source: Unknown\n"
+        "________________________________________________________________________________\n\n"
+        "Live Call Transfer\n\n"
+        "Name: Third Lineartest\n"
+        "DOB: 01/01/1980\n\n"
+        "Number: 4045550301\n"
+        "Address: 1 Test St\n"
+        "City: Macon\nState: GA\nZip Code: 31201\n\n"
+        "Homeowner\n1 CAR\n2010 Honda Civic\n\n"
+        "Insurance:\nGeico Ins. about 1 year.\n\n"
+        "Lead Source: Unknown\n"
+        "________________________________________________________________________________\n\n"
+        "Live Call Transfer\n\n"
+        "Name: Fourth Lineartest\n"
+        "DOB: 02/02/1985\n\n"
+        "Number: 4045550302\n"
+        "Address: 2 Test St\n"
+        "City: Savannah\nState: GA\nZip Code: 31401\n\n"
+        "Renter\n1 CAR\n2011 Ford Focus\n\n"
+        "Insurance:\nAllstate Ins. about 1 year.\n\n"
+        "Lead Source: Unknown\n"
+        "________________________________________________________________________________\n"
+    )
+    df, report = organize_text(txt, tmp_path)
+    assert report["header_inferred"] is True
+    assert df["Full Name"].tolist() == [
+        "Linda Lineartest", "Gladys Lineartest", "Third Lineartest", "Fourth Lineartest",
+    ]
+    linda, gladys = df.iloc[0], df.iloc[1]
+    assert linda["Date of Birth"] == "09/28/1937"
+    assert linda["Phone Number"] == "(678) 721-6991"
+    assert linda["Address"] == "32 Berkshire Dr, Cartersville, GA"
+    assert linda["ZIP Code"] == "30120"
+    assert linda["Homeowner"] == "Owner"
+    assert linda["Autos"] == "1"
+    assert linda["Current Insurance"] == "State Farm"
+    assert linda["Cars Make and Model"] == "2015 DODGE Journey"
+    # Gladys: spouse's blank DOB line must not overwrite her own, two cars
+    assert gladys["Date of Birth"] == "08/08/1940"
+    assert gladys["Homeowner"] == "Rented"
+    assert gladys["Autos"] == "2"
+    assert gladys["Current Insurance"] == "Progressive"
+    assert gladys["Cars Make and Model"] == "2014 GMC Sierra / 2016 Toyota Camry"
+
+
 # 14. the bundled sample file runs end-to-end through the organizer
 def test_sample_file_end_to_end():
     sample = os.path.join(BASE, "sample_data", "messy_leads.csv")
