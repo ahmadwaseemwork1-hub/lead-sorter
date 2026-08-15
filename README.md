@@ -78,6 +78,11 @@ table, and download the organized CSV, change report, and error log.
    lines, vehicles, insurance), in blocks separated by banner rows. Each card
    is flattened into one output row; order is blocks top-to-bottom, then
    columns left-to-right.
+4. **Linear card text (.txt)** — the same labeled-cell layout as grid sheets,
+   but one label per LINE in a plain text file (no columns, no delimiter at
+   all), with leads separated by a banner or an underscore rule
+   (`____________`). Detected from the raw text before any delimiter
+   sniffing runs, so a stray comma in an address line can't derail it.
 
 ## What the organizer does
 

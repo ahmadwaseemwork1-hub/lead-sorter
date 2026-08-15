@@ -131,8 +131,8 @@
       <div id="dropzone">
         <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1.5"/><path d="M7 9l5-5 5 5"/><path d="M12 4v13"/></svg>
         <span id="dropmsg">Drag &amp; drop a file here, or click to choose</span>
-        <span id="dropsub">CSV, TSV, XLSX, XLSM or XLS — up to the configured size limit</span>
-        <input type="file" name="file" id="fileinput" accept=".csv,.tsv,.xlsx,.xlsm,.xls,text/csv" style="display:none">
+        <span id="dropsub">CSV, TSV, XLSX, XLSM, XLS or TXT — up to the configured size limit</span>
+        <input type="file" name="file" id="fileinput" accept=".csv,.tsv,.txt,.xlsx,.xlsm,.xls,text/csv,text/plain" style="display:none">
       </div>
       {% if needs_passphrase %}
       <input type="password" name="passphrase" placeholder="Passphrase">
