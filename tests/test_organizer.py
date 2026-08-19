@@ -1,3 +1,4 @@
+import itertools
 import os
 
 import pytest
@@ -416,6 +417,83 @@ def test_linear_card_file_flattened(tmp_path):
     assert gladys["Autos"] == "2"
     assert gladys["Current Insurance"] == "Progressive"
     assert gladys["Cars Make and Model"] == "2014 GMC Sierra / 2016 Toyota Camry"
+
+
+# 23. labeled-column file (CRM/quoting-tool export: each field is its OWN
+#     row, label text repeated across every lead's column, actual value on
+#     the row(s) below) — parsed per COLUMN as an independent token stream,
+#     since columns drift out of row-alignment with each other and a single
+#     column can stack more than one lead if "Contact Details" repeats down it
+def test_labeled_columns_file_flattened(tmp_path):
+    col0 = [  # two leads stacked in the same column, with violation noise
+        # in between that must not leak into either lead's fields
+        "Contact Details", "First Name", "John", "Last Name", "Testone",
+        "Primary Phone", "4045550101", "Email", "john@test.com",
+        "Address", "100 Test St", "City", "Atlanta", "State", "GA",
+        "ZipCode", "30301", "Date of Birth", "01/02/1970",
+        "Drivers", "Primary Driver", "Year", "2020", "Make", "Honda", "Model", "Accord",
+        "State Farm Ins.",
+        "Add Violations", "First Name", "John",
+        "Contact Details", "First Name", "Jane", "Last Name", "Testtwo",
+        "Primary Phone", "4045550102", "Email", "jane@test.com",
+        "Address", "500 Test Way", "City", "Rome", "State", "GA",
+        "ZipCode", "30165", "Date of Birth", "03/04/1975",
+        "Drivers", "Primary Driver", "Year", "2019", "Make", "Toyota", "Model", "Camry",
+        "Progressive Ins.",
+    ]
+    col1 = [  # a blank cell between a label and its value (real-world spacing)
+        "Contact Details", "First Name", "Bob", "Last Name", "Testthree",
+        "Primary Phone", "4045550103", "Email", "bob@test.com",
+        "Address", "200 Test Ave", "City", "Macon", "State", "", "GA",
+        "ZipCode", "31201", "Date of Birth", "05/06/1980",
+        "Drivers", "Primary Driver", "Year", "2018", "Make", "Ford", "Model", "F150",
+        "GEICO Ins.",
+    ]
+    col2 = [  # no vehicle at all for this lead
+        "Contact Details", "First Name", "Alice", "Last Name", "Testfour",
+        "Primary Phone", "4045550104", "Email", "alice@test.com",
+        "Address", "300 Test Rd", "City", "Savannah", "State", "GA",
+        "ZipCode", "31401", "Date of Birth", "07/08/1990",
+        "Drivers",
+    ]
+    col3 = [
+        "Contact Details", "First Name", "Carla", "Last Name", "Testfive",
+        "Primary Phone", "4045550105", "Email", "carla@test.com",
+        "Address", "400 Test Blvd", "City", "Athens", "State", "GA",
+        "ZipCode", "30601", "Date of Birth", "09/10/1985",
+        "Drivers",
+    ]
+    rows = itertools.zip_longest(col0, col1, col2, col3, fillvalue="")
+    csv_text = "\n".join(",".join(row) for row in rows)
+
+    df, report = organize_text(csv_text, tmp_path)
+    assert report["header_inferred"] is True
+    names = set(df["Full Name"].tolist())
+    assert names == {
+        "John Testone", "Jane Testtwo", "Bob Testthree", "Alice Testfour", "Carla Testfive",
+    }
+
+    john = df[df["Full Name"] == "John Testone"].iloc[0]
+    assert john["Phone Number"] == "(404) 555-0101"
+    assert john["Address"] == "100 Test St, Atlanta, GA"
+    assert john["ZIP Code"] == "30301"
+    assert john["Date of Birth"] == "01/02/1970"
+    assert john["Current Insurance"] == "State Farm"
+    assert john["Cars Make and Model"] == "2020 Honda Accord"
+
+    # second lead stacked in the same column: its own fields, not John's
+    jane = df[df["Full Name"] == "Jane Testtwo"].iloc[0]
+    assert jane["Phone Number"] == "(404) 555-0102"
+    assert jane["Date of Birth"] == "03/04/1975"
+    assert jane["Current Insurance"] == "Progressive"
+    assert jane["Cars Make and Model"] == "2019 Toyota Camry"
+
+    bob = df[df["Full Name"] == "Bob Testthree"].iloc[0]
+    assert bob["Address"] == "200 Test Ave, Macon, GA"  # blank cell skipped cleanly
+    assert bob["Current Insurance"] == "GEICO"
+
+    alice = df[df["Full Name"] == "Alice Testfour"].iloc[0]
+    assert alice["Cars Make and Model"] == NA  # no vehicle data present, not fabricated
 
 
 # 14. the bundled sample file runs end-to-end through the organizer

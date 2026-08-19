@@ -83,6 +83,19 @@ table, and download the organized CSV, change report, and error log.
    all), with leads separated by a banner or an underscore rule
    (`____________`). Detected from the raw text before any delimiter
    sniffing runs, so a stray comma in an address line can't derail it.
+5. **Labeled-column form exports** — CRM/quoting-tool CSV exports where each
+   field is its own row (the label text, e.g. `First Name`, repeated across
+   every lead's column) with the value on the row(s) below. Parsed per
+   COLUMN as an independent sequence of label→value pairs rather than by any
+   shared row index, because these exports commonly drift out of
+   row-alignment between columns (leads carry a different number of optional
+   sub-records — spouse, additional drivers, violations, vehicles) and a
+   single column can stack more than one lead if the block repeats down it.
+   Homeowner status is typically **not recoverable** from this layout: the
+   option rows (e.g. `Rent` / `Own`) are static template text repeated
+   identically for every lead, with no per-lead marker for which one was
+   actually selected — left as `NA` rather than guessed. Vehicle
+   (Year/Make/Model) and insurance-carrier detection are best-effort.
 
 ## What the organizer does
 

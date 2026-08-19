@@ -557,6 +557,123 @@ def _parse_linear_cards(text):
     return frame, len(blocks)
 
 
+# --------------------------------------- labeled-column (form export) files
+
+# CRM/quoting-tool exports where each field is its OWN row (the label text
+# repeated across every lead's column, e.g. "First Name"), with the actual
+# per-lead value on the row(s) below. Spacing between a label and its value
+# varies per lead, and — because leads carry a different number of optional
+# sub-records (spouse, additional drivers, violations, vehicles) — columns
+# drift out of row-alignment with each other partway through, sometimes
+# within the very same lead. So this is parsed per COLUMN, independently,
+# as a flat sequence of non-blank cell "tokens" walked for label->value
+# pairs, rather than by any shared row index.
+_LABELED_CORE_FIELDS = {
+    "first name": "first", "last name": "last",
+    "primary phone": "phone", "phone": "phone", "phone number": "phone",
+    "email": "email",
+    "address": "address", "city": "city", "state": "state",
+    "zipcode": "zip", "zip code": "zip",
+    "date of birth": "dob",
+}
+_LABELED_SECTION_BOUNDARY = {"drivers"}
+
+
+def _looks_like_labeled_columns(raw):
+    hits_banner = hits_first = 0
+    for col in raw.columns:
+        for v in raw[col].dropna():
+            s = str(v).strip().lower()
+            if s == "contact details":
+                hits_banner += 1
+            elif s == "first name":
+                hits_first += 1
+    return hits_banner >= 1 and hits_first >= 4
+
+
+def _parse_labeled_column(tokens):
+    # the identifying "Contact Details" fields end at the first sub-section
+    # boundary (e.g. "Drivers") — later repeats of Name/DOB for a driver or
+    # violation record must not overwrite the primary contact's own values
+    scope_end = next((i for i, t in enumerate(tokens)
+                       if t.strip().lower() in _LABELED_SECTION_BOUNDARY), len(tokens))
+    fields = {}
+    i = 0
+    while i < scope_end:
+        key = _LABELED_CORE_FIELDS.get(tokens[i].strip().lower())
+        if key and key not in fields and i + 1 < scope_end:
+            val = tokens[i + 1].strip()
+            if val.lower() not in _LABELED_CORE_FIELDS:
+                fields[key] = val
+            i += 2
+            continue
+        i += 1
+
+    name = " ".join(p for p in (fields.get("first"), fields.get("last")) if p).strip()
+    if not name:
+        return None
+
+    # vehicles: a Year/Make/Model run can appear anywhere further down the
+    # column (inside a "Vehicles"/"Add Vehicle" sub-section) — best-effort,
+    # not bounded to a bulletproof sub-scope given how deeply this format nests
+    vehicles = []
+    year = make = model = None
+    for j, t in enumerate(tokens):
+        low = t.strip().lower()
+        if low == "year" and j + 1 < len(tokens):
+            year = tokens[j + 1].strip()
+        elif low == "make" and j + 1 < len(tokens):
+            make = tokens[j + 1].strip()
+        elif low == "model" and j + 1 < len(tokens):
+            model = tokens[j + 1].strip()
+            if make and model.lower() != "model" and len(vehicles) < 4:
+                vehicles.append(" ".join(
+                    p for p in (year, make, model) if p and p.lower() not in ("year", "make")))
+            year = make = model = None
+
+    carrier = None
+    for t in tokens[scope_end:]:
+        for pat, canon in _CARRIER_PATTERNS:
+            if pat.search(t):
+                carrier = canon
+                break
+        if carrier:
+            break
+
+    addr = [p for p in (fields.get("address"), fields.get("city"), fields.get("state")) if p]
+    return {
+        "Full Name": name,
+        "Email": fields.get("email") or "",
+        "Date of Birth": fields.get("dob") or "",
+        "Phone Number": fields.get("phone") or "",
+        "Address": ", ".join(addr),
+        "ZIP Code": fields.get("zip") or "",
+        "Homeowner": "",  # not reliably recoverable — see notes in the PR/README
+        "Autos": str(len(vehicles)) if vehicles else "",
+        "Current Insurance": carrier or "",
+        "Cars Make and Model": " / ".join(vehicles),
+    }
+
+
+def _parse_labeled_columns(raw):
+    """A column can stack MULTIPLE leads if "Contact Details" repeats down
+    it (the file has more leads than fit in one row-block) — split on that
+    before parsing so a later lead's fields (and vehicles) never bleed into
+    an earlier one's."""
+    leads = []
+    for c in range(raw.shape[1]):
+        tokens = [str(v).strip() for v in raw[c] if not pd.isna(v) and str(v).strip()]
+        starts = [i for i, t in enumerate(tokens) if t.strip().lower() == "contact details"]
+        if not starts:
+            starts = [0]
+        for s, e in zip(starts, starts[1:] + [len(tokens)]):
+            lead = _parse_labeled_column(tokens[s:e])
+            if lead:
+                leads.append(lead)
+    frame = pd.DataFrame(leads)
+    return frame, 0
+
+
 # ------------------------------------------------- headerless files
 
 def _find_header_row(raw, schema):
@@ -586,6 +703,9 @@ def _frame_from_raw(raw, schema):
     if _looks_like_grid(raw):
         frame, banners = _parse_grid(raw)
         return frame, True, banners
+    if _looks_like_labeled_columns(raw):
+        frame, skipped = _parse_labeled_columns(raw)
+        return frame, True, skipped
     header_row = _find_header_row(raw, schema)
     if header_row is not None:
         headers, seen = [], {}
