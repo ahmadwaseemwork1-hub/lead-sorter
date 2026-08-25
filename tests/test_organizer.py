@@ -1,3 +1,5 @@
+import csv
+import io
 import itertools
 import os
 
@@ -493,6 +495,96 @@ def test_labeled_columns_file_flattened(tmp_path):
     assert bob["Current Insurance"] == "GEICO"
 
     alice = df[df["Full Name"] == "Alice Testfour"].iloc[0]
+    assert alice["Cars Make and Model"] == NA  # no vehicle data present, not fabricated
+
+
+# 24. verifier/dialer dashboard scrape (UI chrome interleaved with real lead
+#     data: "Refresh" button labels bound each lead card, the phone number
+#     that triggered the transfer sits in a short preamble BEFORE "Refresh"
+#     rather than inside the card, and an "Agent Info" section right after
+#     each card repeats "Full Name" for the AGENT, not the lead)
+def test_verifier_scrape_file_flattened(tmp_path):
+    col_a = [
+        "Phone Number", "4045550201", "No transfer found.", "Select Agent",
+        "Refresh",
+        "Full Name", "John Verifytest",
+        "Date Of Birth", "01/02/1970",
+        "Address", "100 Test St, Atlanta, FL 30301",
+        "Select State", "9", "FL, Florida",
+        "Spouse", "No", "No",
+        "Auto & Home Info",
+        "Current Auto Carrier", "porgressive more then 1 year",
+        "Any Lapses", "No", "No",
+        "Make And Model", "2020 Honda Accord", "2019 Toyota Camry",
+        "Accidents", "No", "No",
+        "Tickets", "No", "No",
+        "Home Owner", "Yes", "Yes",
+        "Transfer Lead Reset Form", "copyright noise",
+        "Agent Info",
+        "Full Name", "Some Agent",  # the AGENT's name — must not leak in
+        "States", "Florida",
+        "Verifier Notes", "some criteria noise",
+        "Lead Info",
+        "Phone Number", "4045550202", "No transfer found.", "Select Agent",
+        "Refresh",
+        "Full Name", "Jane Verifytwo",
+        "Date Of Birth", "03/04/1975",
+        "Address", "200 Test Ave, Macon, FL 31201",
+        "Current Auto Carrier", "State farm - 2 years",
+        "Make And Model", "2018 Ford F150",
+        "Accidents", "No",
+        "Home Owner", "No", "No",
+    ]
+    col_b = [
+        "Phone Number", "4045550203",
+        "Refresh",
+        "Full Name", "Bob Verifythree",
+        "Date Of Birth", "05/06/1980",
+        "Address", "300 Test Rd, Savannah, FL 31401",
+        "Current Auto Carrier", "Geico 10 years",
+        "Home Owner", "Yes", "Yes",
+        "Phone Number", "4045550204",
+        "Refresh",
+        "Full Name", "Alice Verifyfour",
+        "Date Of Birth", "07/08/1990",
+        "Address", "400 Test Blvd, Athens, FL 30601",
+        "Home Owner", "No", "No",
+    ]
+    buf = io.StringIO()
+    csv.writer(buf).writerows(itertools.zip_longest(col_a, col_b, fillvalue=""))
+    csv_text = buf.getvalue()
+
+    df, report = organize_text(csv_text, tmp_path)
+    assert report["header_inferred"] is True
+    names = set(df["Full Name"].tolist())
+    assert names == {
+        "John Verifytest", "Jane Verifytwo", "Bob Verifythree", "Alice Verifyfour",
+    }
+    assert "Some Agent" not in names  # agent's own name must not leak in as a lead
+
+    john = df[df["Full Name"] == "John Verifytest"].iloc[0]
+    assert john["Phone Number"] == "(404) 555-0201"  # from the preamble, not the card
+    assert john["Date of Birth"] == "01/02/1970"
+    assert john["Address"] == "100 Test St, Atlanta, FL 30301"
+    assert john["ZIP Code"] == "30301"
+    assert john["Homeowner"] == "Owner"
+    assert john["Current Insurance"] == "Progressive"  # "porgressive" typo, duration stripped
+    assert john["Cars Make and Model"] == "2020 Honda Accord / 2019 Toyota Camry"
+
+    jane = df[df["Full Name"] == "Jane Verifytwo"].iloc[0]
+    assert jane["Phone Number"] == "(404) 555-0202"
+    assert jane["Homeowner"] == "Rented"
+    assert jane["Current Insurance"] == "State Farm"
+    assert jane["Cars Make and Model"] == "2018 Ford F150"
+
+    bob = df[df["Full Name"] == "Bob Verifythree"].iloc[0]
+    assert bob["Phone Number"] == "(404) 555-0203"
+    assert bob["Current Insurance"] == "GEICO"
+    assert bob["Homeowner"] == "Owner"
+
+    alice = df[df["Full Name"] == "Alice Verifyfour"].iloc[0]
+    assert alice["Phone Number"] == "(404) 555-0204"
+    assert alice["Homeowner"] == "Rented"
     assert alice["Cars Make and Model"] == NA  # no vehicle data present, not fabricated
 
 

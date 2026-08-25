@@ -96,6 +96,17 @@ table, and download the organized CSV, change report, and error log.
    identically for every lead, with no per-lead marker for which one was
    actually selected — left as `NA` rather than guessed. Vehicle
    (Year/Make/Model) and insurance-carrier detection are best-effort.
+6. **Verifier/dialer dashboard scrapes** — a CSV export of a lead-verifier
+   web app's rendered table, where real lead data is interleaved with UI
+   chrome (button labels like `Refresh`, dropdown placeholders like
+   `Select Agent`/`Select State`, record UUIDs, footer/nav text). Each
+   lead's card is bounded by a `Refresh` button label; the phone number that
+   triggered the transfer sits in a short preamble just *before* that
+   `Refresh`, not inside the card. An `Agent Info` section right after each
+   card repeats `Full Name` for the agent, not the lead, so field extraction
+   stops there. Insurance-carrier text often has a trailing duration clause
+   (`"porgressive more then 1 year"`) stripped before the normal
+   typo-correcting carrier normalizer runs on what's left.
 
 ## What the organizer does
 

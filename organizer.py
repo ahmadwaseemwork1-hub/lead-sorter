@@ -674,6 +674,125 @@ def _parse_labeled_columns(raw):
     return frame, 0
 
 
+# --------------------------------------- verifier/dialer dashboard scrapes
+
+# A CSV export of a lead-verifier web app's rendered table: real lead data
+# is interleaved with UI chrome (button labels like "Refresh", dropdown
+# placeholders like "Select Agent"/"Select State", record UUIDs, footer
+# text, nav-menu labels once a column runs out of real leads). Each lead's
+# card is bounded by a "Refresh" button label; the phone number that
+# triggered the transfer sits just BEFORE that "Refresh", not inside the
+# card itself. An "Agent Info" section right after each card repeats
+# "Full Name" for the AGENT, not the lead, so core-field extraction must
+# stop there.
+_VERIFIER_CORE_FIELDS = {
+    "full name": "name", "date of birth": "dob", "address": "address",
+    "current auto carrier": "carrier", "home owner": "homeowner",
+}
+_VERIFIER_SECTION_BOUNDARY = {"agent info"}
+_VERIFIER_VEHICLE_LABEL = "make and model"
+_VERIFIER_KNOWN_LABELS = {
+    "phone number", "no transfer found.", "select agent", "select state",
+    "refresh", "full name", "date of birth", "address", "spouse",
+    "auto & home info", "current auto carrier", "any lapses",
+    "make and model", "accidents", "tickets", "home owner", "home type",
+    "current home carrier", "any claim in past 3 years",
+    "transfer lead reset form", "agent info", "states", "verifier notes",
+    "lead info",
+}
+_VERIFIER_DURATION_RE = re.compile(
+    r"\s*[-–]?\s*(more\s*(than|then)\s*)?\d+\+?\s*(years?|yrs?|months?)\.?\s*$", re.I)
+
+
+def _looks_like_verifier_scrape(raw):
+    hits_refresh = hits_full = 0
+    for col in raw.columns:
+        for v in raw[col].dropna():
+            s = str(v).strip().lower()
+            if s == "refresh":
+                hits_refresh += 1
+            elif s == "full name":
+                hits_full += 1
+    return hits_refresh >= 4 and hits_full >= 4
+
+
+def _parse_verifier_card(tokens):
+    """tokens: one lead's card, already sliced between its "Refresh" and
+    the next one (or the section boundary within it)."""
+    scope_end = next((i for i, t in enumerate(tokens)
+                       if t.strip().lower() in _VERIFIER_SECTION_BOUNDARY), len(tokens))
+    fields = {}
+    i = 0
+    while i < scope_end:
+        key = _VERIFIER_CORE_FIELDS.get(tokens[i].strip().lower())
+        if key and key not in fields and i + 1 < scope_end:
+            val = tokens[i + 1].strip()
+            if val.lower() not in _VERIFIER_KNOWN_LABELS:
+                fields[key] = val
+            i += 2
+            continue
+        i += 1
+
+    name = (fields.get("name") or "").strip()
+    if not name:
+        return None
+
+    # "Make And Model" is followed by one or more raw vehicle description
+    # lines (not broken into Year/Make/Model), until the next known label
+    vehicles = []
+    j = 0
+    while j < scope_end:
+        if tokens[j].strip().lower() == _VERIFIER_VEHICLE_LABEL:
+            k = j + 1
+            while (k < scope_end and len(vehicles) < 4
+                   and tokens[k].strip().lower() not in _VERIFIER_KNOWN_LABELS):
+                vehicles.append(tokens[k].strip())
+                k += 1
+            j = k
+            continue
+        j += 1
+
+    carrier = _VERIFIER_DURATION_RE.sub("", fields.get("carrier") or "").strip(" -")
+    address = fields.get("address") or ""
+    zip_match = re.search(r"(\d{5})(?:-\d{4})?\s*$", address)
+
+    return {
+        "Full Name": name,
+        "Email": "",
+        "Date of Birth": fields.get("dob") or "",
+        "Phone Number": "",  # filled in by the caller from the preamble
+        "Address": address,
+        "ZIP Code": zip_match.group(1) if zip_match else "",
+        "Homeowner": fields.get("homeowner") or "",
+        "Autos": str(len(vehicles)) if vehicles else "",
+        "Current Insurance": carrier,
+        "Cars Make and Model": " / ".join(vehicles),
+    }
+
+
+def _parse_verifier_scrape(raw):
+    leads = []
+    for c in range(raw.shape[1]):
+        tokens = [str(v).strip() for v in raw[c] if not pd.isna(v) and str(v).strip()]
+        refresh_at = [i for i, t in enumerate(tokens) if t.strip().lower() == "refresh"]
+        for idx, r in enumerate(refresh_at):
+            end = refresh_at[idx + 1] if idx + 1 < len(refresh_at) else len(tokens)
+            lead = _parse_verifier_card(tokens[r + 1:end])
+            if lead is None:
+                continue
+            # the phone number that triggered this transfer sits in the
+            # short preamble just before "Refresh", not inside the card
+            phone = None
+            for i in range(r - 1, max(-1, r - 15), -1):
+                if tokens[i].strip().lower() == "phone number" and i + 1 < r:
+                    phone = tokens[i + 1].strip()
+                    break
+            lead["Phone Number"] = phone or ""
+            leads.append(lead)
+    frame = pd.DataFrame(leads)
+    return frame, 0
+
+
 # ------------------------------------------------- headerless files
 
 def _find_header_row(raw, schema):
@@ -705,6 +824,9 @@ def _frame_from_raw(raw, schema):
         return frame, True, banners
     if _looks_like_labeled_columns(raw):
         frame, skipped = _parse_labeled_columns(raw)
+        return frame, True, skipped
+    if _looks_like_verifier_scrape(raw):
+        frame, skipped = _parse_verifier_scrape(raw)
         return frame, True, skipped
     header_row = _find_header_row(raw, schema)
     if header_row is not None:
