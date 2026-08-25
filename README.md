@@ -108,6 +108,14 @@ table, and download the organized CSV, change report, and error log.
    (`"porgressive more then 1 year"`) stripped before the normal
    typo-correcting carrier normalizer runs on what's left.
 
+None of these six patterns will cover every possible export forever — a
+brand-new lead source can still show up in a layout nothing above
+recognizes. When that happens, the portal detects it: if a file parses into
+rows but more than half of them are missing both Full Name and Phone
+Number, a warning banner appears above the results ("this file's layout
+doesn't look fully recognized") instead of silently presenting a table full
+of `NA` as if it succeeded.
+
 ## What the organizer does
 
 - Maps messy headers to schema columns via aliases + fuzzy matching

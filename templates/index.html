@@ -150,6 +150,18 @@
   </div>
 
   {% if result %}
+  {% if result.report.low_confidence %}
+  <div class="card" style="border-color:#f5c9c5">
+    <p class="error" style="margin:0">
+      <b>This file's layout doesn't look fully recognized</b> — most rows are
+      missing a name or phone number, which usually means the organizer had
+      to guess at the structure instead of matching a known pattern. Check
+      the table below before trusting this output. If this is a lead source
+      you'll upload again, share a sample of it so support can add proper
+      support for its exact layout.
+    </p>
+  </div>
+  {% endif %}
   <div class="card">
     <h2><span class="step">2</span>Summary</h2>
     <div class="stats">

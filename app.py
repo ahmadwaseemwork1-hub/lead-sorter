@@ -8,7 +8,7 @@ import pandas as pd
 from flask import Flask, abort, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
 
-from organizer import load_schema, organize_file
+from organizer import NA, load_schema, organize_file
 from pretty_export import build_pretty_workbook
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -107,6 +107,14 @@ def organize():
                   "columns matched the schema and nothing could be inferred from "
                   "the values. Check that this is a leads CSV.")
 
+    # the file parsed and produced rows, but most of them are missing the
+    # two fields every real lead has — this usually means the file's layout
+    # wasn't actually recognized and the organizer fell back to guessing
+    na_name = int((df["Full Name"] == NA).sum()) if "Full Name" in df.columns else 0
+    na_phone = int((df["Phone Number"] == NA).sum()) if "Phone Number" in df.columns else 0
+    report["low_confidence"] = report["output_rows"] > 0 and (
+        na_name / report["output_rows"] > 0.5 or na_phone / report["output_rows"] > 0.5)
+
     out_path = os.path.join(OUTPUT, f"organized_{token}.csv")
     df.to_csv(out_path, index=False)
 
@@ -121,7 +129,7 @@ def organize():
         "email_corrections", "duplicate_groups", "removed_duplicates",
         "duplicates_removed", "invalid_phone_rows", "unmapped_headers",
         "dropped_headers", "skipped_non_lead_rows", "header_inferred",
-        "input_rows", "output_rows") if k in report}
+        "input_rows", "output_rows", "low_confidence") if k in report}
     with open(os.path.join(OUTPUT, f"errors_{token}.json"), "w", encoding="utf-8") as f:
         json.dump(error_log, f, indent=2)
 

@@ -107,3 +107,27 @@ def test_upload_size_limit(client, monkeypatch):
         "file": (io.BytesIO(big), "big.csv")}, content_type="multipart/form-data")
     assert resp.status_code == 413
     assert "too large" in resp.get_data(as_text=True).lower()
+
+
+# 20. a file that parses but has no Name/Phone (an unrecognized layout that
+#     fell back to generic guessing) shows a low-confidence warning instead
+#     of silently presenting a table full of NA as if it succeeded
+def test_low_confidence_warning_on_unrecognized_layout(client):
+    payload = b"Address,Zip Code\n123 Test St,30301\n456 Test Ave,30302\n789 Test Rd,30303\n"
+    resp = client.post("/organize", data={
+        "file": (io.BytesIO(payload), "weird.csv")}, content_type="multipart/form-data")
+    assert resp.status_code == 200
+    assert "doesn't look fully recognized" in resp.get_data(as_text=True)
+
+
+# 20b. a normal, well-recognized file must NOT show the low-confidence warning
+def test_low_confidence_warning_absent_for_normal_file(client):
+    sample = os.path.join(BASE, "sample_data", "messy_leads.csv")
+    with open(sample, "rb") as f:
+        resp = client.post(
+            "/organize",
+            data={"file": (io.BytesIO(f.read()), "messy_leads.csv"), "schema": "default"},
+            content_type="multipart/form-data",
+        )
+    assert resp.status_code == 200
+    assert "doesn't look fully recognized" not in resp.get_data(as_text=True)
