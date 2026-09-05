@@ -26,7 +26,7 @@ _CANONICAL_CARRIERS = [
     "USAA", "Liberty Mutual", "United", "Aetna",
     "Farm Bureau", "Auto-Owners", "Hartford", "National General",
     "Nationwide", "AAA", "Mercury", "Cincinnati", "Direct Auto",
-    "Go Auto", "Bristol West", "Root Insurance", "Travelers", "Farmers",
+    "Go Auto", "Bristol West", "Root Insurance", "Travelers", "Farmers", "Safeco",
 ]
 _CARRIER_KEYS = {re.sub(r"[^a-z]", "", c.lower()): c for c in _CANONICAL_CARRIERS}
 _CARRIER_KEYS.update({
@@ -63,6 +63,7 @@ _CARRIER_PATTERNS = [
     (re.compile(r"\broot\b", re.I), "Root Insurance"),
     (re.compile(r"travelers", re.I), "Travelers"),
     (re.compile(r"\bfarmers\b", re.I), "Farmers"),
+    (re.compile(r"safe\s*co", re.I), "Safeco"),
     (re.compile(r"\bassurance\b", re.I), "Assurance"),
     (re.compile(r"alpha\s*ins\w*", re.I), "Alpha Insurance"),
     (re.compile(r"atl\s*insurance", re.I), "ATL Insurance Group"),
@@ -92,6 +93,22 @@ def _alias_map(schema):
     return alias_to_col
 
 
+_NUMBERED_VEHICLE_RE = re.compile(r"^\s*(?:vehicle|car|auto)\s*#?\s*(\d+)\s*$", re.I)
+
+
+def _numbered_vehicle_columns(headers):
+    """Headers like 'Vehicle 1', 'Vehicle 2', ... 'Vehicle 4' — as opposed to
+    their 'Vehicle 1 Miles' companions, which the regex's end-anchor excludes.
+    Returned in numeric order so multi-vehicle rows read make/model in order."""
+    hits = []
+    for h in headers:
+        m = _NUMBERED_VEHICLE_RE.match(str(h))
+        if m:
+            hits.append((int(m.group(1)), h))
+    hits.sort(key=lambda t: t[0])
+    return [h for _, h in hits]
+
+
 def map_headers(headers, schema):
     """Match input headers to schema columns via aliases, then fuzzy match.
 
@@ -105,7 +122,18 @@ def map_headers(headers, schema):
 
     mapping, dropped, unmapped = {}, [], []
     claimed = set()
+
+    # numbered vehicle columns ("Vehicle 1".."Vehicle 4") must be claimed for
+    # "Cars Make and Model" up front — otherwise a header like "Vehicle 1"
+    # can fuzzy-collide with an unrelated singular alias (e.g. "vehicles" for
+    # Autos) and silently steal that slot with vehicle-description text
+    numbered_vehicles = _numbered_vehicle_columns(headers)
+    if numbered_vehicles:
+        claimed.add("Cars Make and Model")
+
     for header in headers:
+        if header in numbered_vehicles:
+            continue
         n = _norm_header(header)
         if n in drop or difflib.get_close_matches(n, list(drop), n=1, cutoff=0.85):
             dropped.append(header)
@@ -122,6 +150,9 @@ def map_headers(headers, schema):
             unmapped.append(header)
 
     compose = {}
+    if numbered_vehicles:
+        compose["Cars Make and Model"] = numbered_vehicles
+
     for target, part_alias_lists in schema.get("compose", {}).items():
         if target in claimed:
             continue
@@ -255,11 +286,28 @@ def normalize_email(value):
     return NA if _is_missing(s) else s.lower()
 
 
+_CARRIER_NOISE_WORDS = {"insurance", "company", "co", "inc", "corp"}
+
+
+def _strip_carrier_noise(s):
+    # a trailing "Insurance"/"Co"/"Company" (misspelled or not) is common in
+    # real exports and would otherwise pollute the key so a known carrier
+    # fails to match (e.g. "Safeco Insruance" -> "safecoinsruance", not
+    # close enough to "safeco" for the whole-string fuzzy match below) — so
+    # drop it per word, fuzzy too, since a typo there is as likely as one in
+    # the carrier name itself
+    words = re.findall(r"[A-Za-z]+", s)
+    kept = [w for w in words if w.lower() not in _CARRIER_NOISE_WORDS
+            and not difflib.get_close_matches(w.lower(), _CARRIER_NOISE_WORDS, n=1, cutoff=0.75)]
+    return " ".join(kept)
+
+
 def normalize_carrier(value):
     s = _clean(value)
     if _is_missing(s):
         return NA
-    key = re.sub(r"[^a-z]", "", s.lower())
+    stripped = _strip_carrier_noise(s)
+    key = re.sub(r"[^a-z]", "", (stripped or s).lower())
     if key in _CARRIER_KEYS:
         return _CARRIER_KEYS[key]
     close = difflib.get_close_matches(key, list(_CARRIER_KEYS), n=1, cutoff=0.75)
@@ -873,7 +921,20 @@ def _infer_frame(raw):
         return len(d) == 10 or (len(d) == 11 and d.startswith("1"))
 
     def is_zip(v):
-        return bool(re.fullmatch(r"\d{5}(-\d{4})?", v))
+        # spreadsheet exports often store the ZIP as a plain number, which
+        # strips its leading zero (CT/MA/etc. ZIPs) and/or adds a
+        # thousands-separator comma once it's >= 1000 (e.g. "6,790" for
+        # 06790) — strip a comma but require the cell to be ONLY digits
+        # (unlike a street number, which is always followed by more text)
+        core = re.sub(r",", "", v)
+        if not re.fullmatch(r"\d{3,5}|\d{9}", core):
+            return False
+        # a comma-grouped value that's an exact multiple of 500 is almost
+        # always vehicle mileage or a dollar amount ("12,000", "5,000"),
+        # not a ZIP — real ZIPs are essentially never that round
+        if "," in v and int(core) % 500 == 0:
+            return False
+        return True
 
     def is_date(v):
         return bool(re.search(r"[/\-]", v)) and _parse_dt(v) is not None
@@ -957,12 +1018,23 @@ def _infer_frame(raw):
                     if c not in used and ratio(c, is_vehicle) >= 0.5][:3]
     used.update(vehicle_cols)
 
+    def _looks_like_names(c):
+        # a real name column is highly diverse; a constant/near-constant
+        # alpha column (state abbreviation, "Single Family", a fixed
+        # campaign label, ...) can still score high on is_alpha and must
+        # not be mistaken for one
+        vals = samples[c]
+        if len(vals) < 5:
+            return True
+        return len({v.lower() for v in vals}) / len(vals) > 0.3
+
     # name: first alpha column from the left; two adjacent = first + last name
     name_cols = []
     for c in range(ncols):
-        if c not in used and ratio(c, is_alpha) >= 0.8:
+        if c not in used and ratio(c, is_alpha) >= 0.8 and _looks_like_names(c):
             name_cols = [c]
-            if c + 1 < ncols and c + 1 not in used and ratio(c + 1, is_alpha) >= 0.8:
+            if (c + 1 < ncols and c + 1 not in used and ratio(c + 1, is_alpha) >= 0.8
+                    and _looks_like_names(c + 1)):
                 name_cols.append(c + 1)
             break
     used.update(name_cols)
@@ -1050,26 +1122,135 @@ def _read_raw(path):
     return raw, text
 
 
+def _find_embedded_header(raw, schema, start):
+    """Look, from `start` onward, for a row right after a fully-blank row
+    that reads like a real header — the signal that a second, differently
+    shaped export was pasted below the first block in the same file (e.g. a
+    header-less CSV followed by a blank row and then a fresh CSV, header and
+    all). Unlike `_find_header_row`, this isn't limited to the first 10
+    rows, since the paste point can be anywhere. Returns the header's
+    0-based row index, or None."""
+    alias_to_col = _alias_map(schema)
+    drop = {_norm_header(d) for d in schema.get("drop_columns", [])}
+    for r in range(max(start, 1), len(raw)):
+        if not raw.iloc[r - 1].isna().all() or raw.iloc[r].isna().all():
+            continue
+        hits = sum(1 for v in raw.iloc[r] if not pd.isna(v)
+                   and (_norm_header(v) in alias_to_col or _norm_header(v) in drop))
+        if hits >= 2:
+            return r
+    return None
+
+
+def _split_on_embedded_headers(raw, schema):
+    """Split `raw` wherever `_find_embedded_header` fires. A file with none
+    (the overwhelming majority) comes back as a single block, unchanged."""
+    points, search_from = [], 0
+    while True:
+        h = _find_embedded_header(raw, schema, search_from)
+        if h is None:
+            break
+        points.append(h)
+        search_from = h + 1
+    if not points:
+        return [raw]
+    bounds = [0] + points + [len(raw)]
+    return [raw.iloc[bounds[i]:bounds[i + 1]].reset_index(drop=True)
+            for i in range(len(bounds) - 1)]
+
+
+def _organize_block(raw, schema):
+    """Organize one already-isolated raw block: strip its blank rows, find
+    or infer its header, clean the values. Same shape of return as
+    organize_file, minus the file-reading and refinement steps."""
+    blank_rows = 0
+    if not raw.empty:
+        blank = raw.isna().all(axis=1)
+        blank_rows = int(blank.sum())
+        raw = raw[~blank].reset_index(drop=True)
+    if raw.empty:
+        out, report = organize_dataframe(pd.DataFrame(), schema)
+        report["skipped_non_lead_rows"] = blank_rows
+        return out, report
+    df, inferred, skipped = _frame_from_raw(raw, schema)
+    out, report = organize_dataframe(df, schema)
+    report["header_inferred"] = inferred
+    report["skipped_non_lead_rows"] = blank_rows + skipped
+    return out, report
+
+
+def _merge_blocks(outs, reports):
+    """Concatenate multiple already-organized (out, report) pairs — from
+    different blocks of the same file — into one, renumbering every
+    row-indexed report field to the final combined row numbers."""
+    out = pd.concat(outs, ignore_index=True)
+    merged = {
+        "input_rows": sum(r["input_rows"] for r in reports),
+        "output_rows": sum(r["output_rows"] for r in reports),
+        "duplicates_removed": sum(r["duplicates_removed"] for r in reports),
+        "removed_duplicates": [d for r in reports for d in r["removed_duplicates"]],
+        "empty_rows_skipped": sum(r["empty_rows_skipped"] for r in reports),
+        "skipped_non_lead_rows": sum(r["skipped_non_lead_rows"] for r in reports),
+        "header_inferred": any(r["header_inferred"] for r in reports),
+        "invalid_phone_rows": [],
+        "column_issues": {},
+        "dropped_headers": sorted({h for r in reports for h in r["dropped_headers"]}),
+        "unmapped_headers": sorted({h for r in reports for h in r["unmapped_headers"]}),
+        "row_diffs": [],
+        "aux_data": pd.DataFrame(),
+        "timestamp_synthesized": any(r["timestamp_synthesized"] for r in reports),
+    }
+    # aux_data must line up row-for-row with the combined `out` even though
+    # each block may have recognized a different set of aux columns (e.g.
+    # only one block's header had an Email column) — so every block
+    # contributes a same-length frame over the UNION of aux columns, using
+    # NA for any column it didn't have, rather than a mismatched row count
+    aux_cols = sorted({c for r in reports for c in (
+        r["aux_data"].columns if hasattr(r.get("aux_data"), "columns") else [])})
+
+    offset = 0
+    aux_frames = []
+    for out_block, r in zip(outs, reports):
+        merged["invalid_phone_rows"] += [i + offset for i in r["invalid_phone_rows"]]
+        merged["row_diffs"] += [{**d, "row": d["row"] + offset} for d in r["row_diffs"]]
+        for col, issue in r["column_issues"].items():
+            agg = merged["column_issues"].setdefault(col, {"fixed": 0, "na": 0})
+            agg["fixed"] += issue["fixed"]
+            agg["na"] += issue["na"]
+        if aux_cols:
+            aux = r.get("aux_data")
+            n = len(out_block)
+            aux_frames.append(pd.DataFrame({
+                c: aux[c].reset_index(drop=True)
+                   if hasattr(aux, "columns") and c in aux.columns else [NA] * n
+                for c in aux_cols
+            }, index=range(n)))
+        offset += r["output_rows"]
+    if aux_frames:
+        merged["aux_data"] = pd.concat(aux_frames, ignore_index=True)
+    return out, merged
+
+
 def organize_file(path, schema):
     raw, text = _read_raw(path)
 
     if text is not None and _looks_like_linear_cards(text):
         df, blocks = _parse_linear_cards(text)
-        inferred, blank_rows = True, 0
-        skipped = max(blocks - len(df), 0)  # preamble/junk blocks with no lead
+        out, report = organize_dataframe(df, schema)
+        report["header_inferred"] = True
+        report["skipped_non_lead_rows"] = max(blocks - len(df), 0)
     else:
-        blank_rows = 0
-        if not raw.empty:
-            blank = raw.isna().all(axis=1)
-            blank_rows = int(blank.sum())
-            raw = raw[~blank].reset_index(drop=True)
-        if raw.empty:
-            return organize_dataframe(pd.DataFrame(), schema)
-        df, inferred, skipped = _frame_from_raw(raw, schema)
-
-    out, report = organize_dataframe(df, schema)
-    report["header_inferred"] = inferred
-    report["skipped_non_lead_rows"] = blank_rows + skipped
+        blocks_raw = _split_on_embedded_headers(raw, schema) if not raw.empty else [raw]
+        results = [_organize_block(b, schema) for b in blocks_raw]
+        non_empty = [(o, r) for o, r in results if len(o)]
+        if len(blocks_raw) == 1:
+            out, report = results[0]
+        elif not non_empty:
+            out, report = results[0]  # all blocks empty: report the first as-is
+        elif len(non_empty) == 1:
+            out, report = non_empty[0]
+        else:
+            out, report = _merge_blocks([o for o, _ in non_empty], [r for _, r in non_empty])
 
     try:  # refinement layer: rules, typo suggestions, fuzzy dedup, scoring
         import refinement
@@ -1144,7 +1325,12 @@ def organize_dataframe(df, schema):
             report["timestamp_synthesized"] = True
         normalize = _NORMALIZERS[types[col]]
         issues = report["column_issues"].get(col)
-        part_sep = " " if types[col] == "name" else ", "
+        if types[col] == "name":
+            part_sep = " "
+        elif col == "Cars Make and Model":
+            part_sep = " / "  # matches the grid/linear/verifier parsers' convention
+        else:
+            part_sep = ", "
         values = []
         for i in df.index:
             raw = ""
@@ -1230,3 +1416,49 @@ def organize_dataframe(df, schema):
 
     report["output_rows"] = int(len(out))
     return out, report
+
+
+# ---------------------------------------------------------------- sanity check
+
+def assess_confidence(df):
+    """Best-effort check for a file that parsed and produced rows, but whose
+    layout the organizer likely got wrong anyway. Two failure shapes matter:
+
+    - core fields are missing for most rows (the original name/phone check)
+    - a column landed on the wrong source data, so it's not NA but it's not
+      right either — e.g. a near-constant field (a state abbreviation, a
+      campaign label) got mistaken for Full Name and now repeats the same
+      handful of values across the whole file, or Address/ZIP came back
+      empty for virtually every row despite Full Name/Phone looking fine
+
+    Returns (flag, reasons) — reasons is a list of short human-readable
+    strings for display; flag is True iff reasons is non-empty."""
+    n = len(df)
+    if n == 0:
+        return False, []
+
+    def na_rate(col):
+        return float((df[col] == NA).sum()) / n if col in df.columns else 1.0
+
+    reasons = []
+    if na_rate("Full Name") > 0.5:
+        reasons.append("most rows are missing a name")
+    if na_rate("Phone Number") > 0.5:
+        reasons.append("most rows are missing a phone number")
+    # Address alone being empty can just mean the source never collected it
+    # (not every lead file has one) — only flag it alongside at least one
+    # other structural field also mostly missing, which points at a broken
+    # column mapping rather than an honestly address-less source
+    core_fields = ("Address", "ZIP Code", "Date of Birth", "Homeowner")
+    core_missing = sum(1 for c in core_fields if na_rate(c) > 0.5)
+    if n >= 8 and na_rate("Address") > 0.8 and core_missing >= 2:
+        reasons.append("address (and other core fields) could not be found for almost every row")
+    if n >= 8 and "Full Name" in df.columns:
+        names = df.loc[df["Full Name"] != NA, "Full Name"]
+        if len(names) >= 8:
+            top_share = names.str.lower().value_counts().iloc[0] / len(names)
+            if top_share > 0.25:
+                reasons.append(
+                    "the name column repeats the same value far too often to be real names")
+
+    return bool(reasons), reasons

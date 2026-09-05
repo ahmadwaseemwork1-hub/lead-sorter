@@ -25,7 +25,7 @@
     {
       "name": "Phone Number",
       "type": "phone",
-      "aliases": ["phone number", "phone", "phone num", "phone no", "telephone", "contact", "contact number", "mobile", "cell", "cell phone"]
+      "aliases": ["phone number", "phone", "phone num", "phone no", "telephone", "contact", "contact number", "mobile", "cell", "cell phone", "number"]
     },
     {
       "name": "ZIP Code",
@@ -40,7 +40,7 @@
     {
       "name": "Autos",
       "type": "int",
-      "aliases": ["autos", "auto", "vehicles", "num autos", "number of autos", "auto count", "vehicle count", "no of cars"]
+      "aliases": ["autos", "auto", "vehicles", "num autos", "number of autos", "auto count", "vehicle count", "no of cars", "vehicles in household"]
     },
     {
       "name": "Current Insurance",

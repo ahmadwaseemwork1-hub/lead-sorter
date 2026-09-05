@@ -7,6 +7,7 @@ import pytest
 
 from organizer import (
     NA,
+    assess_confidence,
     load_schema,
     normalize_carrier,
     normalize_date,
@@ -609,3 +610,110 @@ def test_sample_file_end_to_end():
     for i, v in df["Phone Number"].items():
         if v != NA and not re.fullmatch(r"\(\d{3}\) \d{3}-\d{4}", v):
             assert i in report["invalid_phone_rows"]
+
+
+# 22. numbered "Vehicle N" columns are composed into Cars Make and Model,
+#     and don't get fuzzy-mis-mapped onto Autos (a real regression found on
+#     a real-world CRM export: "Vehicle 1" fuzzy-matched the "vehicles"
+#     alias for Autos before "Vehicles in household" could claim it)
+def test_numbered_vehicle_columns_composed(tmp_path):
+    csv = (
+        "First Name,Last Name,Phone,Vehicles in household,"
+        "Vehicle 1,Vehicle 1 Miles,Vehicle 2,Vehicle 2 Miles\n"
+        "Gwen,Kempin,7062120322,2,2012 Dodge Grand,6000,2013 Toyota Rav4,8000\n"
+    )
+    df, report = organize_text(csv, tmp_path)
+    row = df.iloc[0]
+    assert row["Autos"] == "2"  # from "Vehicles in household", not a vehicle year
+    assert row["Cars Make and Model"] == "2012 Dodge Grand / 2013 Toyota Rav4"
+    assert "Vehicle 1 Miles" in report["unmapped_headers"]
+    assert "Vehicle 2 Miles" in report["unmapped_headers"]
+
+
+# 23. a trailing "Insurance"/typo'd "Insurance" or "Co" doesn't block a
+#     known carrier from being canonicalized
+def test_carrier_noise_words_stripped():
+    assert normalize_carrier("Safeco Insruance") == "Safeco"
+    assert normalize_carrier("SAFECO INSURANCE") == "Safeco"
+    assert normalize_carrier("Auto-Owners Insurance Co") == "Auto-Owners"
+
+
+# 24. headerless ZIP recognized even when the spreadsheet stripped its
+#     leading zero and added a thousands-separator comma (e.g. "6,790" for
+#     06790) — but a comma-grouped, round-number mileage/price value in a
+#     neighboring column must NOT be mistaken for one
+def test_headerless_zip_comma_grouped(tmp_path):
+    csv = (
+        "Gina,Whaley,8603078402,57 Upper Valley Rd,Torrington,CT,\"6,790\","
+        "3,2005 Honda Pilot,\"10,000\"\n"
+        "Justin,Lawrence,2035191386,39 Northwood Dr,Waterbury,CT,\"6,708\","
+        "1,2019 Subaru Impreza,\"5,000\"\n"
+        "Joel,Cincron,8608901483,78 Highview Ave,New Britain,CT,\"6,053\","
+        "1,2014 Jeep Cherokee,\"5,000\"\n"
+    )
+    df, report = organize_text(csv, tmp_path)
+    assert set(df["ZIP Code"]) == {"06790", "06708", "06053"}
+
+
+# 25. a near-constant alpha column (e.g. a repeated state abbreviation)
+#     must not be mistaken for the Full Name column just because it scores
+#     high on "looks like a word" — real names are far more diverse
+def test_headerless_name_column_diversity_guard(tmp_path):
+    firsts = ["Aaron", "Brianna", "Carlos", "Diana", "Evan", "Farah"]
+    lasts = ["Testholt", "Testparks", "Testreyes", "Testwu", "Testli", "Testgomez"]
+    rows = [
+        f"CT,{firsts[i]},{lasts[i]},303555{i:04d},8010{i}"
+        for i in range(6)
+    ]
+    csv = "\n".join(rows) + "\n"
+    df, report = organize_text(csv, tmp_path)
+    assert "Ct" not in df["Full Name"].values
+    assert set(df["Full Name"]) == {f"{firsts[i]} {lasts[i]}" for i in range(6)}
+
+
+# 26. assess_confidence flags a file whose layout wasn't really recognized
+#     (even when it doesn't fail the plain missing-name/phone check), and
+#     stays quiet for a normally-parsed file
+def test_assess_confidence_flags_broken_layout(tmp_path):
+    csv = "Address,Zip Code\n123 Test St,30301\n456 Test Ave,30302\n789 Test Rd,30303\n"
+    df, _ = organize_text(csv, tmp_path)
+    flag, reasons = assess_confidence(df)
+    assert flag is True
+    assert reasons
+
+
+def test_assess_confidence_quiet_for_normal_file():
+    sample = os.path.join(BASE, "sample_data", "messy_leads.csv")
+    df, _ = organize_file(sample, SCHEMA)
+    flag, reasons = assess_confidence(df)
+    assert flag is False
+    assert reasons == []
+
+
+# 27. a real header row appearing deep in the file, right after a blank
+#     row, means a second differently-shaped export was pasted below the
+#     first block — each block should be organized under its own
+#     header/inference pass instead of one layout being forced over both
+def test_embedded_header_after_blank_row_splits_file(tmp_path):
+    firsts = ["Aaron", "Brianna", "Carlos", "Diana", "Evan", "Farah",
+              "Gabriel", "Holly", "Ian", "Jasmine", "Kevin", "Laura"]
+    lasts = ["Testholt", "Testparks", "Testreyes", "Testwu", "Testli", "Testgomez",
+             "Testnoor", "Testkane", "Testvo", "Testruiz", "Testking", "Testolsen"]
+    headerless_rows = [
+        f"{firsts[i]},{lasts[i]},303555{i:04d},Denver,CO,802{i:02d}"
+        for i in range(12)
+    ]
+    csv = (
+        "\n".join(headerless_rows) + "\n"
+        "\n"
+        "Name,Number,DOB,Address\n"
+        "Zed Testzephyr,3035559999,1/1/1980,99 Zed St Denver CO 80299\n"
+    )
+    df, report = organize_text(csv, tmp_path)
+    assert report["input_rows"] == 13  # 12 headerless leads + 1 headered lead
+    assert len(df) == 13
+    assert "Aaron Testholt" in df["Full Name"].values
+    assert "Zed Testzephyr" in df["Full Name"].values
+    zed = df[df["Full Name"] == "Zed Testzephyr"].iloc[0]
+    assert zed["Phone Number"] == "(303) 555-9999"
+    assert zed["Date of Birth"] == "01/01/1980"
