@@ -200,7 +200,24 @@ def normalize_name(value):
     return " ".join(words)
 
 
+# the common date shapes, tried with the fast C strptime path first — calling
+# pd.to_datetime once per cell re-infers the format every time and dominates
+# the runtime on multi-thousand-row files. pd.to_datetime stays as the
+# fallback so nothing that parsed before stops parsing.
+_FAST_DATE_FORMATS = (
+    "%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%m-%d-%Y", "%Y/%m/%d",
+    "%m/%d/%Y %H:%M", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S",
+    "%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y",
+)
+
+
 def _parse_dt(s):
+    s = str(s).strip()
+    for fmt in _FAST_DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            pass
     try:
         return pd.to_datetime(s)
     except (ValueError, TypeError, OverflowError):
