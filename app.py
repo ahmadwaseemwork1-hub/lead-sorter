@@ -16,6 +16,12 @@ UPLOADS = os.path.join(BASE, "uploads")
 OUTPUT = os.path.join(BASE, "output")
 SCHEMAS = os.path.join(BASE, "schemas")
 
+# only render this many rows in the on-page preview table — a big upload
+# (thousands of rows) would otherwise blow the response size and the
+# per-request time budget on a small host. The downloads always hold the
+# full set.
+PREVIEW_ROW_CAP = 1000
+
 _CONFIG_DEFAULTS = {"host": "0.0.0.0", "port": 8080, "passphrase": "",
                     "retention_hours": 24, "max_upload_mb": 50}
 
@@ -130,23 +136,54 @@ def organize():
     with open(os.path.join(OUTPUT, f"errors_{token}.json"), "w", encoding="utf-8") as f:
         json.dump(error_log, f, indent=2)
 
+    # the styled Excel is built lazily on first download (see /xlsx) — for a
+    # multi-thousand-row upload, doing it here would push the request past
+    # the host's time limit and 500 the whole upload
+
     scores_by_row = {s["row"]: s for s in report.get("scores", [])}
     invalid = set(report["invalid_phone_rows"])
+    rows = []
+    for pos, cells in enumerate(df.head(PREVIEW_ROW_CAP).values.tolist()):
+        s = scores_by_row.get(pos + 1, {})
+        rows.append({"cells": cells, "score": s.get("score", ""),
+                     "review": s.get("review", False), "invalid": pos in invalid})
+
+    result = {
+        "columns": list(df.columns),
+        "rows": rows,
+        "total_rows": int(len(df)),
+        "preview_truncated": max(0, int(len(df)) - len(rows)),
+        "report": report,
+        "token": token,
+    }
+    return render_template("index.html", result=result, error=None)
+
+
+def _pretty_xlsx_path(token):
+    """Build the styled workbook from the saved CSV + error log on first
+    request, then reuse it. Keeps the heavy openpyxl pass off the upload
+    path so a big file doesn't time the whole upload out."""
+    out_path = os.path.join(OUTPUT, f"pretty_{token}.xlsx")
+    if os.path.exists(out_path):
+        return out_path
+    csv_path = os.path.join(OUTPUT, f"organized_{token}.csv")
+    if not os.path.exists(csv_path):
+        return None
+    df = pd.read_csv(csv_path, dtype=str).fillna("")
+    scores_by_row, invalid = {}, set()
+    err_path = os.path.join(OUTPUT, f"errors_{token}.json")
+    if os.path.exists(err_path):
+        with open(err_path, "r", encoding="utf-8") as f:
+            log = json.load(f)
+        scores_by_row = {s["row"]: s for s in (log.get("scores") or [])}
+        invalid = set(log.get("invalid_phone_rows") or [])
     rows = []
     for pos, cells in enumerate(df.values.tolist()):
         s = scores_by_row.get(pos + 1, {})
         rows.append({"cells": cells, "score": s.get("score", ""),
                      "review": s.get("review", False), "invalid": pos in invalid})
-
-    build_pretty_workbook(list(df.columns), rows, os.path.join(OUTPUT, f"pretty_{token}.xlsx"))
-
-    result = {
-        "columns": list(df.columns),
-        "rows": rows,
-        "report": report,
-        "token": token,
-    }
-    return render_template("index.html", result=result, error=None)
+    build_pretty_workbook(list(df.columns), rows, out_path)
+    return out_path
 
 
 def _serve(token, pattern, download_name):
@@ -165,7 +202,12 @@ def download(token):
 
 @app.route("/xlsx/<token>")
 def download_xlsx(token):
-    return _serve(token, "pretty_{token}.xlsx", "organized_leads.xlsx")
+    if not token.isalnum():
+        abort(404)
+    path = _pretty_xlsx_path(token)
+    if path is None or not os.path.exists(path):
+        abort(404)
+    return send_file(path, as_attachment=True, download_name="organized_leads.xlsx")
 
 
 @app.route("/diff/<token>")

@@ -131,3 +131,49 @@ def test_low_confidence_warning_absent_for_normal_file(client):
         )
     assert resp.status_code == 200
     assert "doesn't look fully recognized" not in resp.get_data(as_text=True)
+
+
+# 21. the styled Excel is built lazily on first /xlsx hit (not during the
+#     upload) — a big upload would otherwise time the whole request out
+def test_xlsx_built_lazily(client):
+    hdr = "Timestamp,Full Name,Phone,Zip,Homeowner,Autos,Carrier\n"
+    body = "".join(
+        f"01/05/2026,Lazy Testcase {i},404555{i:04d},30301,Owner,2,GEICO\n"
+        for i in range(20))
+    resp = client.post("/organize", data={
+        "file": (io.BytesIO((hdr + body).encode()), "lazy.csv"), "schema": "default"},
+        content_type="multipart/form-data")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    token = html.split("/download/")[1].split('"')[0]
+
+    # not created at organize time
+    assert not os.path.exists(
+        os.path.join(app_module.OUTPUT, f"pretty_{token}.xlsx"))
+
+    r1 = client.get(f"/xlsx/{token}")
+    assert r1.status_code == 200
+    assert r1.data[:2] == b"PK"  # a real xlsx (zip) came back
+    assert os.path.exists(os.path.join(app_module.OUTPUT, f"pretty_{token}.xlsx"))
+    # second hit serves the cached file
+    assert client.get(f"/xlsx/{token}").status_code == 200
+
+
+# 21b. a large upload only renders a capped preview, with a note, but the
+#      downloaded CSV still has every row
+def test_large_upload_preview_capped(client, monkeypatch):
+    monkeypatch.setattr(app_module, "PREVIEW_ROW_CAP", 10)
+    hdr = "Timestamp,Full Name,Phone,Zip\n"
+    body = "".join(
+        f"01/05/2026,Cap Testcase {i},404555{i:04d},303{i:02d}\n" for i in range(25))
+    resp = client.post("/organize", data={
+        "file": (io.BytesIO((hdr + body).encode()), "big.csv"), "schema": "default"},
+        content_type="multipart/form-data")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "Showing the first" in html and "of <b>25</b>" in html
+    assert html.count('class="pill') == 10  # only 10 rows rendered
+
+    token = html.split("/download/")[1].split('"')[0]
+    csv_body = client.get(f"/download/{token}").get_data(as_text=True)
+    assert len(csv_body.strip().splitlines()) == 26  # header + all 25 rows

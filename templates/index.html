@@ -231,7 +231,10 @@
   </div>
 
   <div class="card">
-    <h2><span class="step">3</span>Organized leads ({{ result.rows|length }}) — click a header to sort</h2>
+    <h2><span class="step">3</span>Organized leads ({{ result.total_rows if result.total_rows is defined else result.rows|length }}) — click a header to sort</h2>
+    {% if result.preview_truncated %}
+      <p class="note">Showing the first <b>{{ result.rows|length }}</b> of <b>{{ result.total_rows }}</b> rows here to keep the page fast — the downloads below contain all {{ result.total_rows }}.</p>
+    {% endif %}
     <div class="scroll">
       <table id="leads">
         <thead>
