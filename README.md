@@ -65,6 +65,15 @@ Inputs: CSV, TSV, semicolon/pipe-delimited, XLSX/XLSM/XLS (all sheets).
 File type is detected from content, so a mislabeled extension won't crash it;
 UTF-8/CP1252/Latin-1 encodings are handled automatically.
 
+**Every sheet of a workbook is organized on its own terms.** A leads workbook
+usually holds several unrelated exports — one sheet per state or per source,
+each in a different layout, often next to already-organized copies — so each
+sheet gets its own layout detection and parsing pass, and the results are
+stacked at the end. A lead that appears on more than one sheet (the usual
+"raw export plus an organized copy of it" workbook) is kept once. A sheet
+that can't be read at all is skipped and counted rather than failing the
+whole upload.
+
 Try it with `sample_data/messy_leads.csv` — upload, review the summary +
 table, and download the organized CSV, change report, and error log.
 

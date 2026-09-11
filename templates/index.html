@@ -204,6 +204,9 @@
     {% if result.report.header_inferred %}
       <p class="note">No header row was found in this file, so column meanings were inferred from the data itself (phones, dates, ZIPs, carriers, …). Double-check the result.</p>
     {% endif %}
+    {% if result.report.unreadable_blocks %}
+      <p class="note">{{ result.report.unreadable_blocks }} sheet/section of this file couldn't be read and {{ 'was' if result.report.unreadable_blocks == 1 else 'were' }} skipped — everything else was organized normally.</p>
+    {% endif %}
     {% if result.report.timestamp_synthesized %}
       <p class="note">This file had no timestamp / date-added column, so <b>Timestamp</b> was stamped with the time this file was processed instead of being left blank.</p>
     {% endif %}

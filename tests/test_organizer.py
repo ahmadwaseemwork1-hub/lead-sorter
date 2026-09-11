@@ -717,3 +717,121 @@ def test_embedded_header_after_blank_row_splits_file(tmp_path):
     zed = df[df["Full Name"] == "Zed Testzephyr"].iloc[0]
     assert zed["Phone Number"] == "(303) 555-9999"
     assert zed["Date of Birth"] == "01/01/1980"
+
+
+# 28. a workbook whose sheets are in DIFFERENT layouts: every sheet is
+#     organized under its own layout instead of all of them being forced
+#     through one guess, and a lead repeated across two sheets (the common
+#     "raw export + already-organized copy of it" workbook) is deduped once
+def test_multi_sheet_workbook_each_sheet_own_layout(tmp_path):
+    import pandas as pd
+
+    # sheet 1: an ordinary header table
+    plain = pd.DataFrame({
+        "Full Name": ["Plain Sheetone", "Second Sheetone"],
+        "Phone": ["4045550701", "4045550702"],
+        "DOB": ["01/02/1970", "03/04/1975"],
+        "Zip": ["30301", "30302"],
+    })
+
+    # sheet 2: a grid/card sheet — one lead per COLUMN of labeled cells
+    # (the grid detector needs at least four cards before it will commit)
+    grid = pd.DataFrame([
+        ["Live Call Transfer :"] * 4,
+        ["Name: Grid Sheettwo", "Name: Other Sheettwo",
+         "Name: Third Sheettwo", "Name: Fourth Sheettwo"],
+        ["DOB: 05/06/1960", "DOB: 07/08/1965",
+         "DOB: 09/10/1970", "DOB: 11/12/1975"],
+        ["Number: 4045550703", "Number: 4045550704",
+         "Number: 4045550705", "Number: 4045550706"],
+        ["Address: 100 Grid St", "Address: 200 Grid St",
+         "Address: 300 Grid St", "Address: 400 Grid St"],
+        ["City: Atlanta", "City: Macon", "City: Athens", "City: Augusta"],
+        ["State: GA"] * 4,
+        ["Zip Code: 30303", "Zip Code: 31201",
+         "Zip Code: 30601", "Zip Code: 30901"],
+        ["Homeowner", "Renter", "Homeowner", "Renter"],
+        ["CAR: 1"] * 4,
+        ["2015 Toyota Camry", "2016 Honda Civic",
+         "2017 Ford F150", "2018 Kia Soul"],
+        ["Insurance: geico", "Insurance: prograssive",
+         "Insurance: allstate", "Insurance: STATEFARM"],
+    ])
+
+    # sheet 3: an already-organized copy of sheet 1's first lead — the same
+    # person must not come out twice
+    dupe = pd.DataFrame({
+        "Timestamp": ["01/05/2026"],
+        "Full Name": ["Plain Sheetone"],
+        "Date of Birth": ["01/02/1970"],
+        "Address": ["NA"],
+        "Phone Number": ["(404) 555-0701"],
+        "ZIP Code": ["30301"],
+        "Homeowner": ["NA"],
+        "Autos": ["NA"],
+        "Current Insurance": ["NA"],
+        "Cars Make and Model": ["NA"],
+    })
+
+    p = tmp_path / "workbook.xlsx"
+    with pd.ExcelWriter(p) as w:
+        plain.to_excel(w, sheet_name="plain", index=False)
+        grid.to_excel(w, sheet_name="grid", index=False, header=False)
+        dupe.to_excel(w, sheet_name="already-organized", index=False)
+
+    df, report = organize_file(str(p), SCHEMA)
+    names = df["Full Name"].tolist()
+
+    # every sheet contributed, each parsed under its own layout
+    assert "Plain Sheetone" in names and "Second Sheetone" in names
+    assert "Grid Sheettwo" in names and "Other Sheettwo" in names
+    # the grid sheet's per-card fields survived (they only parse correctly
+    # when that sheet is routed to the grid parser on its own)
+    grid_lead = df[df["Full Name"] == "Grid Sheettwo"].iloc[0]
+    assert grid_lead["Phone Number"] == "(404) 555-0703"
+    assert grid_lead["Address"] == "100 Grid St, Atlanta, GA"
+    assert grid_lead["ZIP Code"] == "30303"
+    assert grid_lead["Current Insurance"] == "GEICO"
+    assert grid_lead["Cars Make and Model"] == "2015 Toyota Camry"
+    # the lead duplicated on the already-organized sheet appears exactly once
+    assert names.count("Plain Sheetone") == 1
+    assert report["duplicates_removed"] >= 1
+
+
+# 29. a card-layout sheet is recognized as ONE unit even though it is full of
+#     blank rows and repeats its field labels on every card — the
+#     embedded-header split (meant for two plain tables stacked in one file)
+#     must not shred it into fragments too small to read as cards any more
+def test_card_layout_not_split_by_embedded_headers(tmp_path):
+    import itertools
+
+    def card(n):
+        return [
+            "Contact Details", "First Name", f"Cardsplit{n}",
+            "Last Name", "Testcase", "Primary Phone", f"40455508{n:02d}",
+            "Address", f"{n} Split St", "City", "Atlanta", "State", "GA",
+            "ZipCode", f"303{n:02d}", "Date of Birth", "01/02/1970",
+            "Drivers", "Primary Driver",
+        ]
+
+    # six cards per column, with a fully blank row between each — exactly the
+    # shape that used to trigger a split on every gap
+    cols = []
+    for c in range(4):
+        col = []
+        for n in range(6):
+            col += card(c * 6 + n) + [""]
+        cols.append(col)
+
+    rows = list(itertools.zip_longest(*cols, fillvalue=""))
+    csv_text = "\n".join(",".join(r) for r in rows)
+    p = tmp_path / "cards.csv"
+    p.write_text(csv_text, encoding="utf-8")
+
+    df, report = organize_file(str(p), SCHEMA)
+    names = df["Full Name"].tolist()
+    assert len(df) == 24, f"expected all 24 cards, got {len(df)}: {names[:5]}"
+    assert names.count("Cardsplit0 Testcase") == 1
+    assert df[df["Full Name"] == "Cardsplit0 Testcase"].iloc[0]["ZIP Code"] == "30300"
+    # no fragment fell through to content-inference and invented blank leads
+    assert (df["Full Name"] != NA).all()

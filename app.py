@@ -132,7 +132,7 @@ def organize():
         "duplicates_removed", "invalid_phone_rows", "unmapped_headers",
         "dropped_headers", "skipped_non_lead_rows", "header_inferred",
         "input_rows", "output_rows", "low_confidence",
-        "low_confidence_reasons") if k in report}
+        "low_confidence_reasons", "unreadable_blocks") if k in report}
     with open(os.path.join(OUTPUT, f"errors_{token}.json"), "w", encoding="utf-8") as f:
         json.dump(error_log, f, indent=2)
 

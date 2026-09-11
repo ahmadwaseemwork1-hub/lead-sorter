@@ -72,6 +72,24 @@ _CARRIER_PATTERNS = [
 _OWNER_WORDS = {"owner", "own", "owns", "owned", "homeowner", "home owner", "yes", "y", "o"}
 _RENTED_WORDS = {"rented", "rent", "rents", "renter", "renting", "tenant", "lease", "no", "n", "r"}
 
+# One alternation of every carrier pattern, used only as a pre-filter: the
+# card parsers test a lot of text that holds no carrier at all, and running
+# all ~20 patterns over each of those dominated the runtime on big files.
+# A hit still falls through to the ordered scan, so which carrier wins when
+# a line mentions two of them is unchanged.
+_CARRIER_ANY_RE = re.compile(
+    "|".join(f"(?:{p.pattern})" for p, _ in _CARRIER_PATTERNS), re.I)
+
+
+def _find_carrier_mention(text):
+    """First carrier named anywhere in `text`, by _CARRIER_PATTERNS order."""
+    if not _CARRIER_ANY_RE.search(text):
+        return None
+    for pat, canon in _CARRIER_PATTERNS:
+        if pat.search(text):
+            return canon
+    return None
+
 
 def load_schema(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -351,6 +369,7 @@ _NORMALIZERS = {
 
 _GRID_NAME_RE = re.compile(r"^\s*name\b\s*[:=]?\s*[:=]?\s*(.*)$", re.I)
 _GRID_DOB_RE = re.compile(r"^\s*d\.?\s*o\.?\s*b\.?\b\s*[:=]?\s*(.*)$", re.I)
+_GRID_DOB_START_RE = re.compile(r"^\s*d\.?\s*o\.?\s*b\.?\b", re.I)
 _GRID_PHONE_RE = re.compile(r"^\s*(?:number|phone)\b\s*[:=]?\s*(.*)$", re.I)
 _GRID_ADDR_RE = re.compile(r"^\s*address\b\s*[:=]?\s*(.*)$", re.I)
 _GRID_CITY_RE = re.compile(r"^\s*city\s*[:=]\s*=?\s*(.*)$", re.I)
@@ -375,17 +394,38 @@ _YEAR_RE = re.compile(r"(19|20)\d{2}")
 _GA_ZIP_RE = re.compile(r"\b(3[01]\d{3})\b")
 
 
-def _looks_like_grid(raw):
+def _scan_cells(raw):
+    """One pass over every non-blank cell, collecting everything the layout
+    detectors need: how often each exact (lower-cased) cell text occurs, plus
+    the "Name:"/"DOB:" counts the grid detector keys on. The detectors used
+    to walk the whole block separately, which on a big multi-sheet workbook
+    cost more than the parsing did."""
+    empty = {"counts": {}, "grid_names": 0, "grid_dobs": 0}
+    if raw.empty:
+        return empty
+    flat = pd.Series(raw.to_numpy(dtype=object).ravel()).dropna()
+    if flat.empty:
+        return empty
+    low = flat.astype(str).str.strip().str.lower()
+    low = low[low != ""]
+    if low.empty:
+        return empty
+    # both grid regexes are case-insensitive, so matching the already
+    # lower-cased text is equivalent; the prefix filters just skip the rows
+    # that could never have matched
+    heads = low[low.str.startswith("name")]
+    dobs = low[low.str.startswith("d")]
+    return {
+        "counts": low.value_counts().to_dict(),
+        "grid_names": int(heads.str.match(_GRID_NAME_RE.pattern).sum()) if len(heads) else 0,
+        "grid_dobs": int(dobs.str.match(_GRID_DOB_START_RE.pattern).sum()) if len(dobs) else 0,
+    }
+
+
+def _looks_like_grid(raw, scan=None):
     """A 'grid' file stores each lead as a column of labeled cells."""
-    names = dobs = 0
-    for col in raw.columns:
-        for v in raw[col].dropna():
-            s = str(v)
-            if _GRID_NAME_RE.match(s) and re.match(r"^\s*name\b", s, re.I):
-                names += 1
-            elif re.match(r"^\s*d\.?\s*o\.?\s*b\.?\b", s, re.I):
-                dobs += 1
-    return names >= 4 and dobs >= 4
+    scan = scan or _scan_cells(raw)
+    return scan["grid_names"] >= 4 and scan["grid_dobs"] >= 4
 
 
 def _grid_homeowner(text):
@@ -476,26 +516,23 @@ def _parse_grid_lead(cells):
         # vehicle: needs a make AND a year somewhere in the text
         if _MAKE_RE.search(t) and _YEAR_RE.search(t):
             v = _GRID_CAR_LABEL_RE.sub("", t).strip()
-            for pat, canon in _CARRIER_PATTERNS:  # "...RAM Insurance:" tails
-                cm = pat.search(v)
-                if cm:
-                    if carrier is None:
-                        carrier = canon
-                    v = v[:cm.start()].strip(" ,/")
-                    break
+            if _CARRIER_ANY_RE.search(v):  # "...RAM Insurance:" tails
+                for pat, canon in _CARRIER_PATTERNS:
+                    cm = pat.search(v)
+                    if cm:
+                        if carrier is None:
+                            carrier = canon
+                        v = v[:cm.start()].strip(" ,/")
+                        break
             v = re.sub(r"\binsurance\b\s*:?\s*$", "", v, flags=re.I).strip(" ,/")
             v = " ".join(v.split("\n")[0].split())
             if v and len(vehicles) < 4:
                 vehicles.append(v)
             continue
-        matched = False
-        for pat, canon in _CARRIER_PATTERNS:
-            if pat.search(t):
-                if carrier is None:
-                    carrier = canon
-                matched = True
-                break
-        if matched:
+        canon = _find_carrier_mention(t)
+        if canon is not None:
+            if carrier is None:
+                carrier = canon
             continue
         m = _GRID_INS_RE.match(t)
         if m:
@@ -644,32 +681,26 @@ _LABELED_CORE_FIELDS = {
 _LABELED_SECTION_BOUNDARY = {"drivers"}
 
 
-def _looks_like_labeled_columns(raw):
-    hits_banner = hits_first = 0
-    for col in raw.columns:
-        for v in raw[col].dropna():
-            s = str(v).strip().lower()
-            if s == "contact details":
-                hits_banner += 1
-            elif s == "first name":
-                hits_first += 1
-    return hits_banner >= 1 and hits_first >= 4
+def _looks_like_labeled_columns(raw, scan=None):
+    counts = (scan or _scan_cells(raw))["counts"]
+    return counts.get("contact details", 0) >= 1 and counts.get("first name", 0) >= 4
 
 
-def _parse_labeled_column(tokens):
+def _parse_labeled_column(tokens, lows=None):
+    if lows is None:
+        lows = [t.lower() for t in tokens]
     # the identifying "Contact Details" fields end at the first sub-section
     # boundary (e.g. "Drivers") — later repeats of Name/DOB for a driver or
     # violation record must not overwrite the primary contact's own values
-    scope_end = next((i for i, t in enumerate(tokens)
-                       if t.strip().lower() in _LABELED_SECTION_BOUNDARY), len(tokens))
+    scope_end = next((i for i, low in enumerate(lows)
+                       if low in _LABELED_SECTION_BOUNDARY), len(tokens))
     fields = {}
     i = 0
     while i < scope_end:
-        key = _LABELED_CORE_FIELDS.get(tokens[i].strip().lower())
+        key = _LABELED_CORE_FIELDS.get(lows[i])
         if key and key not in fields and i + 1 < scope_end:
-            val = tokens[i + 1].strip()
-            if val.lower() not in _LABELED_CORE_FIELDS:
-                fields[key] = val
+            if lows[i + 1] not in _LABELED_CORE_FIELDS:
+                fields[key] = tokens[i + 1]
             i += 2
             continue
         i += 1
@@ -683,25 +714,24 @@ def _parse_labeled_column(tokens):
     # not bounded to a bulletproof sub-scope given how deeply this format nests
     vehicles = []
     year = make = model = None
-    for j, t in enumerate(tokens):
-        low = t.strip().lower()
-        if low == "year" and j + 1 < len(tokens):
-            year = tokens[j + 1].strip()
-        elif low == "make" and j + 1 < len(tokens):
-            make = tokens[j + 1].strip()
-        elif low == "model" and j + 1 < len(tokens):
-            model = tokens[j + 1].strip()
-            if make and model.lower() != "model" and len(vehicles) < 4:
+    last = len(tokens) - 1
+    for j, low in enumerate(lows):
+        if j >= last:
+            break
+        if low == "year":
+            year = tokens[j + 1]
+        elif low == "make":
+            make = tokens[j + 1]
+        elif low == "model":
+            model = tokens[j + 1]
+            if make and lows[j + 1] != "model" and len(vehicles) < 4:
                 vehicles.append(" ".join(
                     p for p in (year, make, model) if p and p.lower() not in ("year", "make")))
             year = make = model = None
 
     carrier = None
     for t in tokens[scope_end:]:
-        for pat, canon in _CARRIER_PATTERNS:
-            if pat.search(t):
-                carrier = canon
-                break
+        carrier = _find_carrier_mention(t)
         if carrier:
             break
 
@@ -720,6 +750,16 @@ def _parse_labeled_column(tokens):
     }
 
 
+def _column_tokens(series):
+    """One column's non-blank cell texts, in row order, with a parallel
+    lower-cased copy. The card parsers compare the same token against label
+    lists several times over, so folding case once here rather than at each
+    comparison takes a big bite out of the runtime on large sheets."""
+    s = series.dropna().astype(str).str.strip()
+    s = s[s != ""]
+    return s.tolist(), s.str.lower().tolist()
+
+
 def _parse_labeled_columns(raw):
     """A column can stack MULTIPLE leads if "Contact Details" repeats down
     it (the file has more leads than fit in one row-block) — split on that
@@ -727,12 +767,12 @@ def _parse_labeled_columns(raw):
     an earlier one's."""
     leads = []
     for c in range(raw.shape[1]):
-        tokens = [str(v).strip() for v in raw[c] if not pd.isna(v) and str(v).strip()]
-        starts = [i for i, t in enumerate(tokens) if t.strip().lower() == "contact details"]
+        tokens, lows = _column_tokens(raw[c])
+        starts = [i for i, low in enumerate(lows) if low == "contact details"]
         if not starts:
             starts = [0]
         for s, e in zip(starts, starts[1:] + [len(tokens)]):
-            lead = _parse_labeled_column(tokens[s:e])
+            lead = _parse_labeled_column(tokens[s:e], lows[s:e])
             if lead:
                 leads.append(lead)
     frame = pd.DataFrame(leads)
@@ -769,31 +809,25 @@ _VERIFIER_DURATION_RE = re.compile(
     r"\s*[-–]?\s*(more\s*(than|then)\s*)?\d+\+?\s*(years?|yrs?|months?)\.?\s*$", re.I)
 
 
-def _looks_like_verifier_scrape(raw):
-    hits_refresh = hits_full = 0
-    for col in raw.columns:
-        for v in raw[col].dropna():
-            s = str(v).strip().lower()
-            if s == "refresh":
-                hits_refresh += 1
-            elif s == "full name":
-                hits_full += 1
-    return hits_refresh >= 4 and hits_full >= 4
+def _looks_like_verifier_scrape(raw, scan=None):
+    counts = (scan or _scan_cells(raw))["counts"]
+    return counts.get("refresh", 0) >= 4 and counts.get("full name", 0) >= 4
 
 
-def _parse_verifier_card(tokens):
+def _parse_verifier_card(tokens, lows=None):
     """tokens: one lead's card, already sliced between its "Refresh" and
     the next one (or the section boundary within it)."""
-    scope_end = next((i for i, t in enumerate(tokens)
-                       if t.strip().lower() in _VERIFIER_SECTION_BOUNDARY), len(tokens))
+    if lows is None:
+        lows = [t.lower() for t in tokens]
+    scope_end = next((i for i, low in enumerate(lows)
+                       if low in _VERIFIER_SECTION_BOUNDARY), len(tokens))
     fields = {}
     i = 0
     while i < scope_end:
-        key = _VERIFIER_CORE_FIELDS.get(tokens[i].strip().lower())
+        key = _VERIFIER_CORE_FIELDS.get(lows[i])
         if key and key not in fields and i + 1 < scope_end:
-            val = tokens[i + 1].strip()
-            if val.lower() not in _VERIFIER_KNOWN_LABELS:
-                fields[key] = val
+            if lows[i + 1] not in _VERIFIER_KNOWN_LABELS:
+                fields[key] = tokens[i + 1]
             i += 2
             continue
         i += 1
@@ -807,11 +841,11 @@ def _parse_verifier_card(tokens):
     vehicles = []
     j = 0
     while j < scope_end:
-        if tokens[j].strip().lower() == _VERIFIER_VEHICLE_LABEL:
+        if lows[j] == _VERIFIER_VEHICLE_LABEL:
             k = j + 1
             while (k < scope_end and len(vehicles) < 4
-                   and tokens[k].strip().lower() not in _VERIFIER_KNOWN_LABELS):
-                vehicles.append(tokens[k].strip())
+                   and lows[k] not in _VERIFIER_KNOWN_LABELS):
+                vehicles.append(tokens[k])
                 k += 1
             j = k
             continue
@@ -838,19 +872,19 @@ def _parse_verifier_card(tokens):
 def _parse_verifier_scrape(raw):
     leads = []
     for c in range(raw.shape[1]):
-        tokens = [str(v).strip() for v in raw[c] if not pd.isna(v) and str(v).strip()]
-        refresh_at = [i for i, t in enumerate(tokens) if t.strip().lower() == "refresh"]
+        tokens, lows = _column_tokens(raw[c])
+        refresh_at = [i for i, low in enumerate(lows) if low == "refresh"]
         for idx, r in enumerate(refresh_at):
             end = refresh_at[idx + 1] if idx + 1 < len(refresh_at) else len(tokens)
-            lead = _parse_verifier_card(tokens[r + 1:end])
+            lead = _parse_verifier_card(tokens[r + 1:end], lows[r + 1:end])
             if lead is None:
                 continue
             # the phone number that triggered this transfer sits in the
             # short preamble just before "Refresh", not inside the card
             phone = None
             for i in range(r - 1, max(-1, r - 15), -1):
-                if tokens[i].strip().lower() == "phone number" and i + 1 < r:
-                    phone = tokens[i + 1].strip()
+                if lows[i] == "phone number" and i + 1 < r:
+                    phone = tokens[i + 1]
                     break
             lead["Phone Number"] = phone or ""
             leads.append(lead)
@@ -878,19 +912,30 @@ def _find_header_row(raw, schema):
     return best_row if best_hits >= 2 else None
 
 
-def _frame_from_raw(raw, schema):
+def _is_card_layout(raw, scan=None):
+    """True for the one-lead-per-column card layouts (grid, labeled-column,
+    verifier scrape). They're recognized as a whole sheet or not at all, so
+    callers must not chop them up first."""
+    scan = scan or _scan_cells(raw)
+    return (_looks_like_grid(raw, scan)
+            or _looks_like_labeled_columns(raw, scan)
+            or _looks_like_verifier_scrape(raw, scan))
+
+
+def _frame_from_raw(raw, schema, scan=None):
     """Turn a header-less read into a headed DataFrame.
 
     Returns (df, inferred) — inferred is True when no header row existed and
     columns had to be deduced from the data content.
     """
-    if _looks_like_grid(raw):
+    scan = scan or _scan_cells(raw)  # shared by all three layout detectors
+    if _looks_like_grid(raw, scan):
         frame, banners = _parse_grid(raw)
         return frame, True, banners
-    if _looks_like_labeled_columns(raw):
+    if _looks_like_labeled_columns(raw, scan):
         frame, skipped = _parse_labeled_columns(raw)
         return frame, True, skipped
-    if _looks_like_verifier_scrape(raw):
+    if _looks_like_verifier_scrape(raw, scan):
         frame, skipped = _parse_verifier_scrape(raw)
         return frame, True, skipped
     header_row = _find_header_row(raw, schema)
@@ -1098,10 +1143,16 @@ _XLS_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # OLE2 (legacy .xls)
 
 
 def _read_raw(path):
-    """Read any tabular file into a raw headerless frame, plus the decoded
-    text for text files (None for Excel) — the text lets callers detect a
-    non-tabular layout (e.g. linear card sheets) before delimiter-sniffing
-    has a chance to mangle it.
+    """Read any tabular file into a LIST of raw headerless blocks, plus the
+    decoded text for text files (None for Excel) — the text lets callers
+    detect a non-tabular layout (e.g. linear card sheets) before
+    delimiter-sniffing has a chance to mangle it.
+
+    Every sheet of a workbook is its own block. A leads workbook routinely
+    holds several different exports — one sheet per state or per source,
+    each in its OWN layout, often alongside already-organized copies — so
+    concatenating them would force a single layout guess across all of them
+    and lose most of the data.
 
     File type is detected from CONTENT, not extension — a .csv that is
     really an XLSX parses fine. Text files get encoding + delimiter
@@ -1111,8 +1162,7 @@ def _read_raw(path):
 
     if head[:4] == _XLSX_MAGIC or head == _XLS_MAGIC:
         sheets = pd.read_excel(path, sheet_name=None, header=None, dtype=str)
-        frames = [f for f in sheets.values() if not f.empty]
-        return (pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()), None
+        return [f for f in sheets.values() if not f.empty], None
 
     with open(path, "rb") as f:
         data = f.read()
@@ -1124,7 +1174,7 @@ def _read_raw(path):
         except UnicodeDecodeError:
             continue
     if text is None or not text.strip():
-        return pd.DataFrame(), None
+        return [], None
 
     sep = ","
     try:
@@ -1136,7 +1186,7 @@ def _read_raw(path):
                           skip_blank_lines=False, sep=sep, engine="python")
     except (pd.errors.EmptyDataError, pd.errors.ParserError):
         raw = pd.DataFrame()
-    return raw, text
+    return [raw], text
 
 
 def _find_embedded_header(raw, schema, start):
@@ -1176,10 +1226,12 @@ def _split_on_embedded_headers(raw, schema):
             for i in range(len(bounds) - 1)]
 
 
-def _organize_block(raw, schema):
+def _organize_block(raw, schema, scan=None):
     """Organize one already-isolated raw block: strip its blank rows, find
     or infer its header, clean the values. Same shape of return as
-    organize_file, minus the file-reading and refinement steps."""
+    organize_file, minus the file-reading and refinement steps. `scan` is a
+    `_scan_cells` result for this same block, when the caller already has
+    one (dropping all-blank rows can't change it)."""
     blank_rows = 0
     if not raw.empty:
         blank = raw.isna().all(axis=1)
@@ -1189,7 +1241,7 @@ def _organize_block(raw, schema):
         out, report = organize_dataframe(pd.DataFrame(), schema)
         report["skipped_non_lead_rows"] = blank_rows
         return out, report
-    df, inferred, skipped = _frame_from_raw(raw, schema)
+    df, inferred, skipped = _frame_from_raw(raw, schema, scan)
     out, report = organize_dataframe(df, schema)
     report["header_inferred"] = inferred
     report["skipped_non_lead_rows"] = blank_rows + skipped
@@ -1248,8 +1300,52 @@ def _merge_blocks(outs, reports):
     return out, merged
 
 
+def _dedupe_merged(out, report, schema):
+    """Dedupe the combined frame from several blocks, renumbering every
+    row-indexed report field to the surviving rows. `organize_dataframe`
+    already deduped inside each block; this catches the same lead appearing
+    in two different blocks."""
+    dedupe_on = schema.get("dedupe_on")
+    if not dedupe_on or out.empty:
+        return out, report
+    keys = [dedupe_on] if isinstance(dedupe_on, str) else list(dedupe_on)
+    keys = [k for k in keys if k in out.columns]
+    if not keys:
+        return out, report
+
+    folded = out[keys].apply(lambda s: s.str.lower().str.strip())
+    dup = folded.duplicated(keep="first") & (out[keys] != NA).all(axis=1)
+    if not dup.any():
+        return out, report
+
+    label_cols = list(dict.fromkeys(
+        (["Full Name"] if "Full Name" in out.columns else []) + keys))
+    report["duplicates_removed"] += int(dup.sum())
+    report["removed_duplicates"] += [
+        {k: row[k] for k in label_cols} for _, row in out[dup].iterrows()]
+
+    keep = ~dup
+    old_to_new, n = {}, 0
+    for pos, kept in enumerate(keep.tolist()):
+        if kept:
+            old_to_new[pos] = n
+            n += 1
+    report["invalid_phone_rows"] = [
+        old_to_new[i] for i in report["invalid_phone_rows"] if i in old_to_new]
+    report["row_diffs"] = [
+        {**d, "row": old_to_new[d["row"] - 1] + 1}
+        for d in report["row_diffs"] if (d["row"] - 1) in old_to_new]
+    aux = report.get("aux_data")
+    if hasattr(aux, "columns") and len(aux) == len(out):
+        report["aux_data"] = aux[keep.to_numpy()].reset_index(drop=True)
+
+    out = out[keep].reset_index(drop=True)
+    report["output_rows"] = int(len(out))
+    return out, report
+
+
 def organize_file(path, schema):
-    raw, text = _read_raw(path)
+    frames, text = _read_raw(path)
 
     if text is not None and _looks_like_linear_cards(text):
         df, blocks = _parse_linear_cards(text)
@@ -1257,10 +1353,35 @@ def organize_file(path, schema):
         report["header_inferred"] = True
         report["skipped_non_lead_rows"] = max(blocks - len(df), 0)
     else:
-        blocks_raw = _split_on_embedded_headers(raw, schema) if not raw.empty else [raw]
-        results = [_organize_block(b, schema) for b in blocks_raw]
+        # every sheet is its own block, and a plain-table sheet can itself
+        # hold more than one export stacked behind an embedded header row
+        blocks_raw = []
+        for frame in frames:
+            if frame.empty:
+                continue
+            scan = _scan_cells(frame)
+            if _is_card_layout(frame, scan):
+                # card sheets repeat their field labels on every card and
+                # are full of blank rows, so the embedded-header split would
+                # shred one into fragments too small to still read as cards
+                blocks_raw.append((frame, scan))
+            else:
+                blocks_raw += [(b, None)
+                               for b in _split_on_embedded_headers(frame, schema)]
+        if not blocks_raw:
+            blocks_raw = [(pd.DataFrame(), None)]
+        # one unreadable sheet must not sink the rest of the workbook, so a
+        # block that blows up is counted and skipped rather than propagated
+        results, unreadable = [], 0
+        for b, s in blocks_raw:
+            try:
+                results.append(_organize_block(b, schema, s))
+            except Exception:  # noqa: BLE001 - any block-level failure
+                unreadable += 1
+        if not results:
+            results = [_organize_block(pd.DataFrame(), schema)]
         non_empty = [(o, r) for o, r in results if len(o)]
-        if len(blocks_raw) == 1:
+        if len(results) == 1:
             out, report = results[0]
         elif not non_empty:
             out, report = results[0]  # all blocks empty: report the first as-is
@@ -1268,6 +1389,11 @@ def organize_file(path, schema):
             out, report = non_empty[0]
         else:
             out, report = _merge_blocks([o for o, _ in non_empty], [r for _, r in non_empty])
+            # blocks are deduped individually; the same lead can still appear
+            # in two of them (a workbook holding both a raw export sheet and
+            # an already-organized copy of it is the common case)
+            out, report = _dedupe_merged(out, report, schema)
+        report["unreadable_blocks"] = unreadable
 
     try:  # refinement layer: rules, typo suggestions, fuzzy dedup, scoring
         import refinement
