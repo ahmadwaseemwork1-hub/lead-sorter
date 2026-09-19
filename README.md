@@ -117,7 +117,17 @@ table, and download the organized CSV, change report, and error log.
    (`"porgressive more then 1 year"`) stripped before the normal
    typo-correcting carrier normalizer runs on what's left.
 
-None of these six patterns will cover every possible export forever — a
+**Layouts 3, 5 and 6 can be mixed in the same sheet, even down the same
+column.** Real exports are pasted together from several sources — a run of
+one CRM's "Contact Details" cards, then a dialer's "Refresh" card, then a
+"Name:" card, then more of the first — so those layouts are handled at the
+CARD level, not the file level: each column is read as a stream of cards,
+every card is cut out at its own start marker, and each is parsed under its
+own layout. Nothing has to "win" the detection, so nothing is dropped. The
+"Name:" cards may also carry a label and its value in adjacent cells
+(`Number:` then `4784947768`); those are folded together before parsing.
+
+None of these patterns will cover every possible export forever — a
 brand-new lead source can still show up in a layout nothing above
 recognizes. When that happens, the portal detects it: if a file parses into
 rows but more than half of them are missing both Full Name and Phone

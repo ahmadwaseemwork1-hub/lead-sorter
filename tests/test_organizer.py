@@ -835,3 +835,70 @@ def test_card_layout_not_split_by_embedded_headers(tmp_path):
     assert df[df["Full Name"] == "Cardsplit0 Testcase"].iloc[0]["ZIP Code"] == "30300"
     # no fragment fell through to content-inference and invented blank leads
     assert (df["Full Name"] != NA).all()
+
+
+# 30. three card layouts interleaved down the SAME columns (a run of one
+#     CRM's "Contact Details" cards, then a dialer's "Refresh" card, then a
+#     "Name:" card whose labels and values sit in adjacent cells): every card
+#     is parsed under its own layout, instead of whichever layout won the
+#     detection swallowing the whole sheet and dropping the rest
+def test_mixed_card_layouts_in_one_column(tmp_path):
+    labeled = lambda n: [
+        "Contact Details", "First Name", f"Lab{n}", "Last Name", "Mixtest",
+        "Primary Phone", f"40455509{n:02d}", "Address", f"{n} Mix St",
+        "City", "Atlanta", "State", "GA", "ZipCode", f"303{n:02d}",
+        "Date of Birth", "01/02/1970", "Drivers", "Primary Driver",
+    ]
+    verifier = [
+        "Lead Info", "Phone Number", "4045550950", "No transfer found.",
+        "Select Agent", "Refresh",
+        "Full Name", "Ver Mixtest", "Date Of Birth", "03/04/1975",
+        "Address", "50 Mix Ave, Macon, GA 31201",
+        "Current Auto Carrier", "Geico - 2 years",
+        "Make And Model", "2019 Toyota Camry", "Accidents", "No",
+        "Home Owner", "Yes", "Yes", "Agent Info", "Full Name", "Some Agent",
+    ]
+    grid = [  # label and value in ADJACENT cells, plus a spouse sub-record
+        "Live Call Transfer:", "PROSPECT:",
+        "Name: Grid Mixtest", "DOB= 05/06/1960",
+        "SPOUSE:", "NAME: Spouse Mixtest", "DOB= 07/08/1962",
+        "Number:", "4045550960", "Address:", "121 Mix Dr",
+        "City:", "Swainsboro", "State:", "GEORGIA", "Zip Code", "30401",
+        "Other Information:", "No Accident, No Ticket", "HOMEOWNER (NO CLAIMS)",
+        "1 CAR", "2016 Honda Civic", "AUTO OWNERS INSURANCE for 2 YEARS",
+        "Lead Source: Unknown",
+    ]
+    # column A: labeled, verifier, grid, labeled — all four in one column;
+    # columns B-D: enough labeled cards to trip the labeled detector
+    col_a = labeled(1) + verifier + grid + labeled(2)
+    cols = [col_a] + [labeled(10 + c) + labeled(20 + c) for c in range(3)]
+    rows = list(itertools.zip_longest(*cols, fillvalue=""))
+    buf = io.StringIO()
+    csv.writer(buf).writerows(rows)
+    p = tmp_path / "mixed.csv"
+    p.write_text(buf.getvalue(), encoding="utf-8")
+
+    df, report = organize_file(str(p), SCHEMA)
+    names = set(df["Full Name"].tolist())
+    assert {"Lab1 Mixtest", "Lab2 Mixtest", "Ver Mixtest", "Grid Mixtest"} <= names
+    assert "Spouse Mixtest" not in names       # the spouse line is not its own lead
+    assert "Some Agent" not in names           # nor is the agent
+
+    ver = df[df["Full Name"] == "Ver Mixtest"].iloc[0]
+    assert ver["Phone Number"] == "(404) 555-0950"   # from the preamble before Refresh
+    assert ver["Current Insurance"] == "GEICO"
+    assert ver["Homeowner"] == "Owner"
+    assert ver["Cars Make and Model"] == "2019 Toyota Camry"
+
+    grd = df[df["Full Name"] == "Grid Mixtest"].iloc[0]
+    assert grd["Date of Birth"] == "05/06/1960"       # the prospect's, not the spouse's
+    assert grd["Phone Number"] == "(404) 555-0960"   # "Number:" then the value in the next cell
+    assert grd["Address"] == "121 Mix Dr, Swainsboro, GA"
+    assert grd["ZIP Code"] == "30401"                 # "Zip Code" with no colon
+    assert grd["Cars Make and Model"] == "2016 Honda Civic"
+
+    # the labeled card AFTER the grid card came through intact — the grid
+    # card's tail didn't bleed into it
+    lab2 = df[df["Full Name"] == "Lab2 Mixtest"].iloc[0]
+    assert lab2["Phone Number"] == "(404) 555-0902"
+    assert lab2["Address"] == "2 Mix St, Atlanta, GA"

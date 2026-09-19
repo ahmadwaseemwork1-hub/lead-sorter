@@ -374,8 +374,12 @@ _GRID_PHONE_RE = re.compile(r"^\s*(?:number|phone)\b\s*[:=]?\s*(.*)$", re.I)
 _GRID_ADDR_RE = re.compile(r"^\s*address\b\s*[:=]?\s*(.*)$", re.I)
 _GRID_CITY_RE = re.compile(r"^\s*city\s*[:=]\s*=?\s*(.*)$", re.I)
 _GRID_STATE_RE = re.compile(r"^\s*state\s*[:=]\s*=?\s*(.*)$", re.I)
-_GRID_ZIP_RE = re.compile(r"^\s*zip\s*_?\s*code?\s*[:=]\s*=?\s*(.*)$", re.I)
+_GRID_ZIP_RE = re.compile(r"^\s*zip\s*_?\s*code?\s*[:=]?\s*=?\s*(.*)$", re.I)
 _GRID_INS_RE = re.compile(r"^\s*(?:insurance|inc)\b\s*[:=/]?\s*(.*)$", re.I)
+_GRID_EMAIL_RE = re.compile(r"^\s*e-?mail\b\s*[:=]?\s*(.*)$", re.I)
+_GRID_FIELD_RES = (_GRID_NAME_RE, _GRID_DOB_RE, _GRID_PHONE_RE, _GRID_ADDR_RE,
+                   _GRID_CITY_RE, _GRID_STATE_RE, _GRID_ZIP_RE, _GRID_INS_RE,
+                   _GRID_EMAIL_RE)
 _GRID_SKIP_RE = re.compile(
     r"live\s*call\s*transfer|lead\s*source|^\s*information|"
     r"^\s*\d+\s*(accidents?|tickets?|dui)\b|^\s*duration\b|only\s*home\s*insurance|"
@@ -449,7 +453,34 @@ def _grid_clean_insurance(text):
     return re.sub(r"[/:=.,]+", " ", t).strip()
 
 
-_GRID_EMAIL_RE = re.compile(r"^\s*e-?mail\b\s*[:=]?\s*(.*)$", re.I)
+def _grid_field_value(t):
+    """The value part of the first grid field label `t` carries ('' when the
+    cell is the bare label), or None when `t` isn't a labeled field cell."""
+    for rx in _GRID_FIELD_RES:
+        m = rx.match(t)
+        if m:
+            return m.group(1).strip(" :=,")
+    return None
+
+
+def _merge_split_labels(cells):
+    """Some exports put a card field's label and its value in ADJACENT cells
+    ('Number:' then '4784947768') rather than one ('Number: 4784947768').
+    Fold each bare-label cell together with the value cell after it, so the
+    parser sees the one-cell form it was built for. A bare label followed by
+    another label (a genuinely blank field) is left alone."""
+    out, i = [], 0
+    while i < len(cells):
+        t = cells[i]
+        if (i + 1 < len(cells) and _grid_field_value(t) == ""
+                and _grid_field_value(cells[i + 1]) is None
+                and not _GRID_SKIP_RE.search(cells[i + 1])):
+            out.append(t.rstrip(" :=") + ": " + cells[i + 1].strip())
+            i += 2
+            continue
+        out.append(t)
+        i += 1
+    return out
 
 
 def _parse_grid_lead(cells):
@@ -458,7 +489,7 @@ def _parse_grid_lead(cells):
     email = None
     addr_parts, vehicles = [], []
 
-    for t in cells:
+    for t in _merge_split_labels(cells):
         m = _GRID_EMAIL_RE.match(t)
         if m:
             if email is None and "@" in m.group(1):
@@ -760,25 +791,6 @@ def _column_tokens(series):
     return s.tolist(), s.str.lower().tolist()
 
 
-def _parse_labeled_columns(raw):
-    """A column can stack MULTIPLE leads if "Contact Details" repeats down
-    it (the file has more leads than fit in one row-block) — split on that
-    before parsing so a later lead's fields (and vehicles) never bleed into
-    an earlier one's."""
-    leads = []
-    for c in range(raw.shape[1]):
-        tokens, lows = _column_tokens(raw[c])
-        starts = [i for i, low in enumerate(lows) if low == "contact details"]
-        if not starts:
-            starts = [0]
-        for s, e in zip(starts, starts[1:] + [len(tokens)]):
-            lead = _parse_labeled_column(tokens[s:e], lows[s:e])
-            if lead:
-                leads.append(lead)
-    frame = pd.DataFrame(leads)
-    return frame, 0
-
-
 # --------------------------------------- verifier/dialer dashboard scrapes
 
 # A CSV export of a lead-verifier web app's rendered table: real lead data
@@ -869,25 +881,77 @@ def _parse_verifier_card(tokens, lows=None):
     }
 
 
-def _parse_verifier_scrape(raw):
+def _verifier_preamble_phone(tokens, lows, refresh_idx):
+    """The phone number that triggered a transfer sits in the short preamble
+    just before that card's "Refresh", not inside the card."""
+    for i in range(refresh_idx - 1, max(-1, refresh_idx - 15), -1):
+        if lows[i] == "phone number" and i + 1 < refresh_idx:
+            return tokens[i + 1]
+    return None
+
+
+# ---------------------------------------- one column = a stream of cards
+
+# Every "one lead per column" layout is really a stream of cards down each
+# column, and real exports MIX them: a run of one CRM's "Contact Details"
+# cards, then a dialer's "Refresh" card, then a "Name:" card pasted in from
+# a text sheet, then more of the first. Picking one parser for the whole
+# sheet keeps whichever layout won the detection and silently drops the
+# rest — so instead each card is cut out at its own start marker and handed
+# to the parser for ITS layout.
+_CARD_STARTS = {"contact details": "labeled", "refresh": "verifier"}
+_CARD_NAME_START_RE = re.compile(r"^\s*name\s*[:=]", re.I)
+# these end the card before them without starting one: the verifier
+# preamble ("Lead Info", then Phone Number / Select Agent / ... / Refresh)
+# and the grid banner that sits above a "Name:" card
+_CARD_ENDS = ("lead info", "live call transfer")
+
+
+def _card_kind(lows, i):
+    kind = _CARD_STARTS.get(lows[i])
+    if kind:
+        return kind
+    if lows[i].startswith("name") and _CARD_NAME_START_RE.match(lows[i]):
+        # a spouse's "NAME:" line inside a grid card is part of that card
+        if i and lows[i - 1].startswith("spouse"):
+            return None
+        return "grid"
+    return None
+
+
+def _parse_card_columns(raw):
     leads = []
     for c in range(raw.shape[1]):
         tokens, lows = _column_tokens(raw[c])
-        refresh_at = [i for i, low in enumerate(lows) if low == "refresh"]
-        for idx, r in enumerate(refresh_at):
-            end = refresh_at[idx + 1] if idx + 1 < len(refresh_at) else len(tokens)
-            lead = _parse_verifier_card(tokens[r + 1:end], lows[r + 1:end])
-            if lead is None:
+        marks = []  # (index, kind-or-None for a bare end marker)
+        for i, low in enumerate(lows):
+            kind = _card_kind(lows, i)
+            if kind:
+                marks.append((i, kind))
+            elif low.startswith(_CARD_ENDS):
+                marks.append((i, None))
+        # a column's first card sometimes lost its "Contact Details" banner
+        # (it sat on a row above where the export started); it still reads
+        # as a labeled card if its own "First Name" label is there
+        first = marks[0][0] if marks else len(tokens)
+        if first > 0 and "first name" in lows[:first]:
+            lead = _parse_labeled_column(tokens[:first], lows[:first])
+            if lead:
+                leads.append(lead)
+        for n, (s, kind) in enumerate(marks):
+            if kind is None:
                 continue
-            # the phone number that triggered this transfer sits in the
-            # short preamble just before "Refresh", not inside the card
-            phone = None
-            for i in range(r - 1, max(-1, r - 15), -1):
-                if lows[i] == "phone number" and i + 1 < r:
-                    phone = tokens[i + 1]
-                    break
-            lead["Phone Number"] = phone or ""
-            leads.append(lead)
+            e = marks[n + 1][0] if n + 1 < len(marks) else len(tokens)
+            if kind == "labeled":
+                lead = _parse_labeled_column(tokens[s:e], lows[s:e])
+            elif kind == "verifier":
+                lead = _parse_verifier_card(tokens[s + 1:e], lows[s + 1:e])
+                if lead is not None:
+                    lead["Phone Number"] = _verifier_preamble_phone(tokens, lows, s) or ""
+            else:  # grid: the "Name:" cell is part of the card
+                lead = _parse_grid_lead(tokens[s:e])
+            if lead:
+                leads.append(lead)
     frame = pd.DataFrame(leads)
     return frame, 0
 
@@ -929,14 +993,15 @@ def _frame_from_raw(raw, schema, scan=None):
     columns had to be deduced from the data content.
     """
     scan = scan or _scan_cells(raw)  # shared by all three layout detectors
-    if _looks_like_grid(raw, scan):
+    grid = _looks_like_grid(raw, scan)
+    others = _looks_like_labeled_columns(raw, scan) or _looks_like_verifier_scrape(raw, scan)
+    if grid and not others:
+        # a pure grid sheet: one card per column per banner-separated block
         frame, banners = _parse_grid(raw)
         return frame, True, banners
-    if _looks_like_labeled_columns(raw, scan):
-        frame, skipped = _parse_labeled_columns(raw)
-        return frame, True, skipped
-    if _looks_like_verifier_scrape(raw, scan):
-        frame, skipped = _parse_verifier_scrape(raw)
+    if grid or others:
+        # any other card layout, or a mix of them down the same columns
+        frame, skipped = _parse_card_columns(raw)
         return frame, True, skipped
     header_row = _find_header_row(raw, schema)
     if header_row is not None:
